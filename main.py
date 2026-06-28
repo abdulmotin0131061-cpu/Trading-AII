@@ -2,6 +2,9 @@ import os
 import requests
 import time
 import numpy as np
+
+from flask import Flask
+import threading
 from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -178,6 +181,16 @@ SYMBOLS = [
     "EUR/JPY", "GBP/JPY", "EUR/GBP", "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD",
     "SOL/USD", "ADA/USD", "XAU/USD", "XAG/USD", "GBP/AUD", "EUR/AUD", "AUD/JPY",
 ]
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Trading AI Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
 # প্রতি মিনিটে ৭টি key × ৩টি symbol = ২১টি market scan করা হয়
 
@@ -659,7 +672,11 @@ def run_scanner():
 
 if __name__ == "__main__":
     init_db()
+
+    threading.Thread(target=run_web, daemon=True).start()
+
     print("Bot is running with Adaptive Confidence System...")
+
     while True:
         try:
             run_scanner()
