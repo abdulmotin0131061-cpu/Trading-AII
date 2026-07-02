@@ -159,13 +159,14 @@ def update_weights(symbol, indicators_status, win):
 # --- Twelve Data API Settings ---
 
 API_KEYS = [
-    os.getenv("TWELVE_KEY_1"),
-    os.getenv("TWELVE_KEY_2"),
-    os.getenv("TWELVE_KEY_3"),
-    os.getenv("TWELVE_KEY_4"),
-    os.getenv("TWELVE_KEY_5"),
-    os.getenv("TWELVE_KEY_6"),
-    os.getenv("TWELVE_KEY_7"),
+    "19e72ea9c60240e1a902f4d1ffa89508",
+    "cb4aff90f22341809ae1344927c2a365",
+    "2ca49ec0c0534851b8ee88bd01858eaf",
+    "769c447e581d4592ad14f7023db745b3",
+    "5d9e7b9a4a014dd38746242410e033e0",
+    "76d81f1fba224b9e88015b34fdcc7f76",
+    "",
+    "API_KEY_8",
 ]
 
 API_KEYS = [k for k in API_KEYS if k]
