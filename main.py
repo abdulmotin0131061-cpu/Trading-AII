@@ -19,10 +19,10 @@ from urllib.parse import quote
 
 # --- DATABASE SETUP ---
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = "postgresql://neondb_owner:xxxxxxxx@ep-xxxxxxxx.us-east-1.aws.neon.tech/neondb?sslmode=require"
 
-if not DATABASE_URL:
-    raise Exception("DATABASE_URL not set. Please add it to environment variables.")
+# if not DATABASE_URL:
+#     raise Exception("DATABASE_URL not set. Please add it to environment variables.")
 
 # Connection pool — প্রতি call-এ নতুন connection খোলার overhead নেই
 _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
