@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 # --- DATABASE SETUP ---
 
-DATABASE_URL = "postgresql://neondb_owner:xxxxxxxx@ep-xxxxxxxx.us-east-1.aws.neon.tech/neondb?sslmode=require"
+DATABASE_URL = "postgresql://neondb_owner:npg_axLci5T4ujdn@ep-patient-salad-atqhdzo2-pooler.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 # if not DATABASE_URL:
 #     raise Exception("DATABASE_URL not set. Please add it to environment variables.")
