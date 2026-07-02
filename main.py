@@ -165,8 +165,8 @@ API_KEYS = [
     "769c447e581d4592ad14f7023db745b3",
     "5d9e7b9a4a014dd38746242410e033e0",
     "76d81f1fba224b9e88015b34fdcc7f76",
-    "",
-    "API_KEY_8",
+    "c0bc2922d3c7486f8234dd67cd18b46a",
+    "6a5adb88517744aba3a40c948404d0b9",
 ]
 
 API_KEYS = [k for k in API_KEYS if k]
@@ -174,8 +174,8 @@ API_KEYS = [k for k in API_KEYS if k]
 if not API_KEYS:
     raise Exception("No TwelveData API key found")
 
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("CHAT_ID")
+TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
+TELEGRAM_CHAT_ID = "6793328058"
 
 SYMBOLS = [
     "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD",
