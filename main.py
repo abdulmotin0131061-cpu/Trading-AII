@@ -499,8 +499,9 @@ def check_result():
     now    = time.time()
     expiry = current_trade['expiry_time']
 
-    if now < expiry + 65:
-        return
+    # Trade শেষ হওয়ার ৩০ সেকেন্ড পরে Result Check শুরু হবে
+if now < expiry + 30:
+    return
 
     # এই trade-এর result আগেই পাঠানো হয়ে গেছে কিনা check করো
     trade_key = f"{current_trade['symbol']}_{current_trade['start_time']}"
