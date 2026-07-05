@@ -517,6 +517,22 @@ if now < expiry + 30:
     exit_price  = get_candle_at_time(current_trade['symbol'], expiry, exit_key)
 
     if entry_price is None or exit_price is None:
+
+    # ৩০ সেকেন্ড পরপর ৪ বার চেষ্টা করবে
+    retry = int((now - (expiry + 30)) // 30)
+
+    if retry < 4:
+        return
+
+    send_telegram_msg(
+        f"⚠️ RESULT UNAVAILABLE\n\n"
+        f"Asset : {current_trade['symbol']}\n"
+        f"Result couldn't be verified after 4 attempts."
+    )
+
+    clear_active_trade()
+    current_trade = None
+    return
        if entry_price is None or exit_price is None:
 
     # ৩০ সেকেন্ড পরপর ৪ বার চেষ্টা করবে
