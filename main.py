@@ -607,9 +607,7 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
 def run_scanner():
     global current_trade, last_scan_minute
 
-    current_trade = load_active_trade()
-    if current_trade:
-        return
+   
 
     now = datetime.now()
     if now.minute == last_scan_minute or not (0 <= now.second <= 10):
