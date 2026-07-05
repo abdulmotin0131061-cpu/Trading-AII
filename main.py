@@ -533,23 +533,9 @@ if now < expiry + 30:
     clear_active_trade()
     current_trade = None
     return
-       if entry_price is None or exit_price is None:
+       
 
-    # ৩০ সেকেন্ড পরপর ৪ বার চেষ্টা করবে
-    retry = int((now - (expiry + 30)) // 30)
-
-    if retry < 4:
-        return
-
-    send_telegram_msg(
-        f"⚠️ RESULT UNAVAILABLE\n\n"
-        f"Asset : {current_trade['symbol']}\n"
-        f"Result couldn't be verified after 4 attempts."
-    )
-
-    clear_active_trade()
-    current_trade = None
-    return
+ 
         if entry_price is None:
             entry_price = float(current_trade['entry_price'])
         if exit_price is None:
