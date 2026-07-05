@@ -533,6 +533,18 @@ if now < expiry + 30:
     clear_active_trade()
     current_trade = None
     return
+    if retry < 4:
+        return
+
+    send_telegram_msg(
+        f"⚠️ RESULT UNAVAILABLE\n\n"
+        f"Asset : {current_trade['symbol']}\n"
+        f"Result couldn't be verified after 4 attempts."
+    )
+
+    clear_active_trade()
+    current_trade = None
+    return
        
 
  
