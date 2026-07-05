@@ -499,7 +499,7 @@ def check_result():
     now    = time.time()
     expiry = current_trade['expiry_time']
 
-    # Trade শেষ হওয়ার ৩০ সেকেন্ড পরে Result Check শুরু হবে
+   # Trade শেষ হওয়ার ৩০ সেকেন্ড পরে Result Check শুরু হবে
 if now < expiry + 30:
     return
 
@@ -517,6 +517,7 @@ if now < expiry + 30:
     exit_price  = get_candle_at_time(current_trade['symbol'], expiry, exit_key)
 
     if entry_price is None or exit_price is None:
+       if entry_price is None or exit_price is None:
 
     # ৩০ সেকেন্ড পরপর ৪ বার চেষ্টা করবে
     retry = int((now - (expiry + 30)) // 30)
@@ -551,19 +552,34 @@ if now < expiry + 30:
     s        = get_stats()
     win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
     result_emoji = "✅ WIN" if win else "❌ LOSS"
-    msg = (
-        f"🏁 TRADE RESULT\n\n"
+
+entry_candle = datetime.fromtimestamp(
+    current_trade['start_time']
+).strftime("%H:%M")
+
+exit_candle = datetime.fromtimestamp(
+    current_trade['expiry_time']
+).strftime("%H:%M")
+
+   msg = (
+    f"🏁 TRADE RESULT\n\n"
         f"📊 Asset: {current_trade['symbol']}\n"
         f"🏆 Result: {result_emoji}\n"
-        f"🚀 Entry: {entry_price}\n"
-        f"🏁 Exit: {exit_price}\n"
+       f"🚀 Entry: {entry_price}\n"
+f"🕒 Entry Candle: {entry_candle}\n\n"
+
+f"🏁 Exit: {exit_price}\n"
+f"🕒 Exit Candle: {exit_candle}\n"
         f"📈 Win Rate: {win_rate:.1f}%"
     )
     trade_symbol    = current_trade['symbol']
     _result_sent_for = trade_key  # এই trade process করা হয়ে গেছে, আর পাঠাবে না
-    clear_active_trade()          # message পাঠানোর আগে DB clear — restart হলেও duplicate আসবে না
-    current_trade   = None
-    send_telegram_msg(msg)
+
+send_telegram_msg(msg)
+
+clear_active_trade()
+current_trade = None
+
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Verified Result: {trade_symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
 
 
@@ -607,7 +623,7 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
 def run_scanner():
     global current_trade, last_scan_minute
 
-   
+ 
 
     now = datetime.now()
     if now.minute == last_scan_minute or not (0 <= now.second <= 10):
@@ -616,9 +632,7 @@ def run_scanner():
     last_scan_minute = now.minute
     print(f"[{now.strftime('%H:%M:%S')}] Scanning markets for signals...")
 
-    current_trade = load_active_trade()
-    if current_trade:
-        return
+  
 
     all_results = []
     # প্রতিটি key-এ ৩টি symbol batch — ৭টি key × ৩টি = ২১টি market
@@ -673,11 +687,13 @@ def run_scanner():
         saved = save_active_trade(current_trade)
 
         if saved:  # DB-তে save সফল হলে তবেই message পাঠাবে
-            msg = (
-                f"SIGNAL ({action})\n\n"
+           entry_time = start.strftime("%H:%M")
+entry_candle = start.strftime("%H:%M")
                 f"{best['symbol']} -> {best['side']}\n"
                 f"Confidence: {conf:.1f}%\n"
-                f"Time: {rec_time} Min\n\n"
+               f"Entry Time : {entry_time}\n"
+f"Expiry : {rec_time} Min\n"
+f"Entry Candle : {entry_candle}\n\n"
                 f"RSI: {best['ind']['rsi']:.1f} | Vol: {'High' if best['ind']['vol_spike'] else 'Normal'}\n\n"
                 f"Place trade on Quotex exactly at the start of next minute (00s)!"
             )
