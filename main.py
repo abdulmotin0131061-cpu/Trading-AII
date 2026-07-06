@@ -1,8 +1,8 @@
-import os১১১১
+import os
 import requests
 import time
 import numpy as np
-
+ 
 from flask import Flask
 import threading
 from datetime import datetime, timedelta
@@ -15,18 +15,17 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import json
 from urllib.parse import quote
-
-
+ 
 # --- DATABASE SETUP ---
-
+ 
 DATABASE_URL = "postgresql://neondb_owner:npg_axLci5T4ujdn@ep-patient-salad-atqhdzo2-pooler.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-
+ 
 # if not DATABASE_URL:
 #     raise Exception("DATABASE_URL not set. Please add it to environment variables.")
-
+ 
 # Connection pool — প্রতি call-এ নতুন connection খোলার overhead নেই
 _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
-
+ 
 @contextmanager
 def db_conn():
     conn = _pool.getconn()
@@ -37,8 +36,7 @@ def db_conn():
         raise
     finally:
         _pool.putconn(conn)
-
-
+ 
 def init_db():
     try:
         with db_conn() as conn:
@@ -50,7 +48,6 @@ def init_db():
                     wins INTEGER DEFAULT 0,
                     losses INTEGER DEFAULT 0
                 );
-
                 CREATE TABLE IF NOT EXISTS active_trade (
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     symbol TEXT,
@@ -63,7 +60,6 @@ def init_db():
                     indicators_status JSONB,
                     CONSTRAINT single_row CHECK (id = 1)
                 );
-
                 CREATE TABLE IF NOT EXISTS indicator_weights (
                     symbol TEXT,
                     name TEXT,
@@ -71,7 +67,6 @@ def init_db():
                     accuracy_factor FLOAT DEFAULT 1.0,
                     PRIMARY KEY (symbol, name)
                 );
-
                 DO $$
                 DECLARE
                     sym TEXT;
@@ -95,8 +90,7 @@ def init_db():
             cur.close()
     except Exception as e:
         print(f"Database Init Error: {e}")
-
-
+ 
 def get_stats():
     try:
         with db_conn() as conn:
@@ -108,8 +102,7 @@ def get_stats():
     except Exception as e:
         print(f"Get Stats Error: {e}")
         return {"total_trades": 0, "wins": 0, "losses": 0}
-
-
+ 
 def update_stats(win=True):
     try:
         with db_conn() as conn:
@@ -122,8 +115,7 @@ def update_stats(win=True):
             cur.close()
     except Exception as e:
         print(f"Update Stats Error: {e}")
-
-
+ 
 def get_weights(symbol):
     try:
         with db_conn() as conn:
@@ -136,8 +128,7 @@ def get_weights(symbol):
             return {r['name']: r['weight'] * r['accuracy_factor'] for r in rows}
     except:
         return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
-
-
+ 
 def update_weights(symbol, indicators_status, win):
     try:
         with db_conn() as conn:
@@ -154,53 +145,38 @@ def update_weights(symbol, indicators_status, win):
             cur.close()
     except Exception as e:
         print(f"Weight Update Error: {e}")
-
-
+ 
 # --- Twelve Data API Settings ---
-
-API_KEYS = [
-    "19e72ea9c60240e1a902f4d1ffa89508",
-    "cb4aff90f22341809ae1344927c2a365",
-    "2ca49ec0c0534851b8ee88bd01858eaf",
-    "769c447e581d4592ad14f7023db745b3",
-    "5d9e7b9a4a014dd38746242410e033e0",
-    "76d81f1fba224b9e88015b34fdcc7f76",
-    "c0bc2922d3c7486f8234dd67cd18b46a",
-    "6a5adb88517744aba3a40c948404d0b9",
-]
-
+ 
+API_KEYS = [ "19e72ea9c60240e1a902f4d1ffa89508", "cb4aff90f22341809ae1344927c2a365", "2ca49ec0c0534851b8ee88bd01858eaf", "769c447e581d4592ad14f7023db745b3", "5d9e7b9a4a014dd38746242410e033e0", "76d81f1fba224b9e88015b34fdcc7f76", "c0bc2922d3c7486f8234dd67cd18b46a", "6a5adb88517744aba3a40c948404d0b9", ]
+ 
 API_KEYS = [k for k in API_KEYS if k]
-
+ 
 if not API_KEYS:
     raise Exception("No TwelveData API key found")
-
+ 
 TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
 TELEGRAM_CHAT_ID = "6793328058"
-
-SYMBOLS = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD",
-    "EUR/JPY", "GBP/JPY", "EUR/GBP", "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD",
-    "SOL/USD", "ADA/USD", "XAU/USD", "XAG/USD", "GBP/AUD", "EUR/AUD", "AUD/JPY",
-]
-
+ 
+SYMBOLS = [ "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "SOL/USD", "ADA/USD", "XAU/USD", "XAG/USD", "GBP/AUD", "EUR/AUD", "AUD/JPY", ]
+ 
 app = Flask(__name__)
-
+ 
 @app.route("/")
 def home():
     return "Trading AI Bot is running!"
-
+ 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
+ 
 # প্রতি মিনিটে ৭টি key × ৩টি symbol = ২১টি market scan করা হয়
-
+ 
 current_trade = None
 last_scan_minute = -1
 _last_sent = {"text": "", "ts": 0}
 _result_sent_for = None  # কোন trade-এর result ইতিমধ্যে পাঠানো হয়েছে তা track করে
-
-
+ 
 def send_telegram_msg(message):
     global _last_sent
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -215,8 +191,7 @@ def send_telegram_msg(message):
         requests.post(url, json=payload, timeout=10)
     except:
         pass
-
-
+ 
 def calculate_ema_signal(df):
     if df is None or len(df) < 20:
         return "HOLD"
@@ -229,15 +204,12 @@ def calculate_ema_signal(df):
     elif last_row["EMA_FAST"] < last_row["EMA_SLOW"] and prev_row["EMA_FAST"] >= prev_row["EMA_SLOW"]:
         return "SELL"
     return "HOLD"
-
-
+ 
 def calculate_indicators(values, symbol="EUR/USD"):
     if not values:
         return None
-
     df = pd.DataFrame(values)
     df.symbol_name = symbol
-
     cols = {"close": "close", "high": "high", "low": "low", "open": "open", "volume": "volume"}
     for k in cols:
         if k not in df.columns:
@@ -245,7 +217,6 @@ def calculate_indicators(values, symbol="EUR/USD"):
                 if col.lower() == k:
                     df[k] = df[col]
                     break
-
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df["high"]  = pd.to_numeric(df["high"],  errors="coerce")
     df["low"]   = pd.to_numeric(df["low"],   errors="coerce")
@@ -254,20 +225,15 @@ def calculate_indicators(values, symbol="EUR/USD"):
     if "volume" not in df.columns:
         df["volume"] = 0.0
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
-
     df.dropna(inplace=True)
     if len(df) < 50:
         return None
-
     df = df[::-1].reset_index(drop=True)
     if len(df) < 50:
         return None
-
     ema_sig = calculate_ema_signal(df)
-
     prices_series = df["close"]
     prices = prices_series.tolist()
-
     deltas = np.diff(prices)
     gains  = np.where(deltas > 0, deltas, 0)
     losses = np.where(deltas < 0, -deltas, 0)
@@ -278,20 +244,16 @@ def calculate_indicators(values, symbol="EUR/USD"):
         avg_gain = (avg_gain * 13 + gains[i]) / 14
         avg_loss = (avg_loss * 13 + losses[i]) / 14
     rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss != 0 else 100
-
     sma_20 = np.mean(prices[-20:])
     std_20 = np.std(prices[-20:])
     upper, lower = sma_20 + (2 * std_20), sma_20 - (2 * std_20)
-
     sma_50    = np.mean(prices[-50:])
     trend_up  = prices[-1] > sma_50
-
     ema_12      = pd.Series(prices_series).ewm(span=12, adjust=False).mean()
     ema_26      = pd.Series(prices_series).ewm(span=26, adjust=False).mean()
     macd_line   = ema_12 - ema_26
     signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean()
     macd_up     = bool(macd_line.iloc[-1] > signal_line.iloc[-1])
-
     high_series, low_series = pd.Series(df["high"]), pd.Series(df["low"])
     tr = pd.concat([
         (high_series - low_series),
@@ -300,14 +262,11 @@ def calculate_indicators(values, symbol="EUR/USD"):
     ], axis=1).max(axis=1)
     atr_val       = float(pd.Series(tr).rolling(14).mean().iloc[-1])
     volatility_low = bool(float(pd.Series(tr).iloc[-1]) < (atr_val * 1.5))
-
     tp             = (high_series + low_series + pd.Series(prices_series)) / 3
     volume_series  = pd.Series(df["volume"])
     vwap_series    = (tp * volume_series).cumsum() / volume_series.replace(0, 1).cumsum()
     vwap_up        = bool(pd.Series(prices_series).iloc[-1] > vwap_series.iloc[-1])
-
     vol_spike = volume_series.iloc[-1] > volume_series.rolling(20).mean().iloc[-1] * 1.5
-
     # Real ADX — Wilder's smoothing (14 period)
     high_arr = df["high"].values
     low_arr  = df["low"].values
@@ -337,13 +296,11 @@ def calculate_indicators(values, symbol="EUR/USD"):
             adx_val = (adx_val * 13 + v) / 14
     else:
         adx_val = 0.0
-    adx_weak = adx_val <= 25   # ADX ≤ 25 → trend দুর্বল
-
+    adx_weak = adx_val <= 25
+    # ADX ≤ 25 → trend দুর্বল
     side_ema = "BUY" if prices[-1] > sma_50 else "SELL"
-
     def rsi_signal(rsi_val, side):
         return (side == "BUY" and rsi_val < 40) or (side == "SELL" and rsi_val > 60)
-
     # --- Real Candlestick Pattern Detection ---
     candle_pattern = False
     if len(df) >= 3:
@@ -368,7 +325,6 @@ def calculate_indicators(values, symbol="EUR/USD"):
         morning_star  = (c1 < o1 and body2 < first_body * 0.3 and c3 > o3 and c3 > (o1 + c1) / 2 and side_ema == "BUY")
         evening_star  = (c1 > o1 and body2 < first_body * 0.3 and c3 < o3 and c3 < (o1 + c1) / 2 and side_ema == "SELL")
         candle_pattern = any([doji, bullish_pin, bearish_pin, bullish_engulfing, bearish_engulfing, morning_star, evening_star])
-
     ind_scores = {
         'trend':        1.0 if (trend_up and prices[-1] > sma_50) or (not trend_up and prices[-1] < sma_50) else 0.0,
         'rsi':          1.0 if rsi_signal(rsi, side_ema) else 0.0,
@@ -381,18 +337,15 @@ def calculate_indicators(values, symbol="EUR/USD"):
         'vwap':         1.0 if (vwap_up and side_ema == "BUY") or (not vwap_up and side_ema == "SELL") else 0.0,
         'candle':       1.0 if candle_pattern else 0.0
     }
-
     weights           = get_weights(symbol)
     symbol_confidence = sum(weights.get(k, 0) * v for k, v in ind_scores.items())
-
     return {
         "rsi": rsi, "upper": upper, "lower": lower, "sma_50": sma_50, "trend_up": trend_up,
         "vol_spike": vol_spike, "adx_low": adx_weak, "curr_p": prices[-1], "ema_sig": ema_sig,
         "macd_up": macd_up, "volatility_low": volatility_low, "vwap_up": vwap_up,
         "candle_signal": candle_pattern, "atr_val": atr_val, "symbol_confidence": symbol_confidence
     }
-
-
+ 
 def get_market_data(symbol, api_key):
     if not api_key:
         return None
@@ -406,8 +359,7 @@ def get_market_data(symbol, api_key):
         return None
     except:
         return None
-
-
+ 
 def get_batch_market_data(symbols_list, api_key):
     if not api_key or not symbols_list:
         return {}
@@ -424,8 +376,7 @@ def get_batch_market_data(symbols_list, api_key):
     except Exception as e:
         print("Batch API Error:", e)
         return {}
-
-
+ 
 def save_active_trade(trade):
     try:
         with db_conn() as conn:
@@ -448,8 +399,7 @@ def save_active_trade(trade):
     except Exception as e:
         print(f"Save Trade Error: {e}")
         return False
-
-
+ 
 def load_active_trade():
     try:
         with db_conn() as conn:
@@ -460,8 +410,7 @@ def load_active_trade():
             return row
     except:
         return None
-
-
+ 
 def clear_active_trade():
     try:
         with db_conn() as conn:
@@ -471,8 +420,7 @@ def clear_active_trade():
             cur.close()
     except:
         pass
-
-
+ 
 def get_candle_at_time(symbol, target_time, api_key):
     values = get_market_data(symbol, api_key)
     if not values:
@@ -487,48 +435,45 @@ def get_candle_at_time(symbol, target_time, api_key):
         except:
             continue
     return None  # exact match না পেলে None — caller fallback handle করবে
-
-
+ 
 def check_result():
     global current_trade, _result_sent_for
     if not current_trade:
         current_trade = load_active_trade()
         if not current_trade:
             return
-
     now    = time.time()
     expiry = current_trade['expiry_time']
-
+ 
     # Trade শেষ হওয়ার ৩০ সেকেন্ড পরে Result Check শুরু হবে
     if now < expiry + 30:
         return
-
     # এই trade-এর result আগেই পাঠানো হয়ে গেছে কিনা check করো
     trade_key = f"{current_trade['symbol']}_{current_trade['start_time']}"
     if trade_key == _result_sent_for:
         clear_active_trade()
         current_trade = None
         return
-
+ 
     entry_key = os.getenv("RESULT_KEY_ENTRY", API_KEYS[0])
     exit_key  = os.getenv("RESULT_KEY_EXIT", API_KEYS[1] if len(API_KEYS) > 1 else API_KEYS[0])
-
+ 
     entry_price = get_candle_at_time(current_trade['symbol'], current_trade['start_time'], entry_key)
     exit_price  = get_candle_at_time(current_trade['symbol'], expiry, exit_key)
-
+ 
     if entry_price is None or exit_price is None:
         # ৩০ সেকেন্ড পরপর ৪ বার চেষ্টা করবে
         retry = int((now - (expiry + 30)) // 30)
-
+ 
         if retry < 4:
             return
-
+ 
         if entry_price is None:
             entry_price = float(current_trade['entry_price'])
         if exit_price is None:
-            values = get_market_data(current_trade['symbol'], exit_key)
-            exit_price = float(values[0]['close']) if values else entry_price
-
+            values      = get_market_data(current_trade['symbol'], exit_key)
+            exit_price  = float(values[0]['close']) if values else entry_price
+ 
         if entry_price is None or exit_price is None:
             send_telegram_msg(
                 f"⚠️ RESULT UNAVAILABLE\n\n"
@@ -538,28 +483,23 @@ def check_result():
             clear_active_trade()
             current_trade = None
             return
-
+ 
     win = (exit_price > entry_price) if current_trade['side'] == "BUY" else (exit_price < entry_price)
     update_stats(win)
-
+ 
     if current_trade.get('indicators_status'):
         status = current_trade['indicators_status']
         if isinstance(status, str):
             status = json.loads(status)
         update_weights(current_trade['symbol'], status, win)
-
+ 
     s        = get_stats()
     win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
     result_emoji = "✅ WIN" if win else "❌ LOSS"
-
-    entry_candle = datetime.fromtimestamp(
-        current_trade['start_time']
-    ).strftime("%H:%M")
-
-    exit_candle = datetime.fromtimestamp(
-        current_trade['expiry_time']
-    ).strftime("%H:%M")
-
+ 
+    entry_candle = datetime.fromtimestamp(current_trade['start_time']).strftime("%H:%M")
+    exit_candle = datetime.fromtimestamp(current_trade['expiry_time']).strftime("%H:%M")
+ 
     msg = (
         f"🏁 TRADE RESULT\n\n"
         f"📊 Asset: {current_trade['symbol']}\n"
@@ -572,14 +512,13 @@ def check_result():
     )
     trade_symbol    = current_trade['symbol']
     _result_sent_for = trade_key  # এই trade process করা হয়ে গেছে, আর পাঠাবে না
-
+ 
     send_telegram_msg(msg)
+ 
     clear_active_trade()
     current_trade = None
-
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Verified Result: {trade_symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
-
-
+ 
 def fetch_and_analyze_batch(symbols_chunk, api_key):
     batch_data = get_batch_market_data(symbols_chunk, api_key)
     results    = []
@@ -587,12 +526,9 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
         ind = calculate_indicators(values, symbol)
         if not ind:
             continue
-
         side_ema = "BUY" if ind['curr_p'] > ind['sma_50'] else "SELL"
-
         def rsi_signal(rsi_val, side):
             return (side == "BUY" and rsi_val < 40) or (side == "SELL" and rsi_val > 60)
-
         status = {
             'trend':        bool((ind['trend_up'] and ind['curr_p'] > ind['sma_50']) or (not ind['trend_up'] and ind['curr_p'] < ind['sma_50'])),
             'rsi':          bool(rsi_signal(ind['rsi'], side_ema)),
@@ -605,7 +541,6 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
             'vwap':         bool((ind['vwap_up'] and side_ema == "BUY") or (not ind['vwap_up'] and side_ema == "SELL")),
             'candle':       bool(ind['candle_signal'])
         }
-
         results.append({
             'symbol': symbol,
             'curr_p': ind['curr_p'],
@@ -615,22 +550,18 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
             'ind':    ind
         })
     return results
-
-
+ 
 def run_scanner():
     global current_trade, last_scan_minute
-
     now = datetime.now()
     if now.minute == last_scan_minute or not (0 <= now.second <= 10):
         return
-
     last_scan_minute = now.minute
     print(f"[{now.strftime('%H:%M:%S')}] Scanning markets for signals...")
-
+ 
     all_results = []
     # প্রতিটি key-এ ৩টি symbol batch — ৭টি key × ৩টি = ২১টি market
     chunks = [SYMBOLS[i:i + 3] for i in range(0, len(SYMBOLS), 3)]
-
     with ThreadPoolExecutor(max_workers=7) as executor:
         futures = [
             executor.submit(fetch_and_analyze_batch, chunk, API_KEYS[i % len(API_KEYS)])
@@ -640,33 +571,27 @@ def run_scanner():
             res = future.result()
             if res:
                 all_results.extend(res)
-
     print(f"[{now.strftime('%H:%M:%S')}] Analyzed {len(all_results)} symbols")
-
     if all_results:
         best      = max(all_results, key=lambda x: x['score'])
         weights   = get_weights(best['symbol'])
         max_score = sum(weights.values())
         conf      = round(min((best['score'] / max_score * 100) if max_score > 0 else 0, 99.0), 1)
         action    = "Strong trade" if conf >= 80 else "Normal trade" if conf >= 60 else "Weak / scalp" if conf >= 40 else "Educational"
-
         # ATR % of price দিয়ে volatility measure করি
         atr_val = best['ind']['atr_val']
         curr_p  = best['curr_p']
         atr_pct = (atr_val / curr_p * 100) if curr_p > 0 else 0.2
-
         # High volatility → trade দ্রুত resolve হয় → ছোট expiry
-        # Low volatility  → market ধীরে move করে → বড় expiry
+        # Low volatility  → market ধীরে move করে → বড় expiry
         if atr_pct > 0.3:       # High volatility
             rec_time = 5 if conf <= 60 else 7
         elif atr_pct > 0.1:     # Medium volatility
             rec_time = 8 if conf <= 60 else 10
         else:                   # Low volatility
             rec_time = 12 if conf <= 60 else 15
-
         start  = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=1)
         expiry = start + timedelta(minutes=rec_time)
-
         current_trade = {
             'symbol':            best['symbol'],
             'entry_price':       best['curr_p'],
@@ -676,9 +601,7 @@ def run_scanner():
             'rec_time':          rec_time,
             'indicators_status': best['status']
         }
-
         saved = save_active_trade(current_trade)
-
         if saved:  # DB-তে save সফল হলে তবেই message পাঠাবে
             entry_time = start.strftime("%H:%M")
             entry_candle = start.strftime("%H:%M")
@@ -692,15 +615,11 @@ def run_scanner():
                 f"Place trade on Quotex exactly at the start of next minute (00s)!"
             )
             send_telegram_msg(msg)
-
-
+ 
 if __name__ == "__main__":
     init_db()
-
     threading.Thread(target=run_web, daemon=True).start()
-
     print("Bot is running with Adaptive Confidence System...")
-
     while True:
         try:
             run_scanner()
