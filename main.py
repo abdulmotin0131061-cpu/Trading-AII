@@ -124,10 +124,10 @@ def get_weights(symbol):
             rows = cur.fetchall()
             cur.close()
             if not rows:
-                return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
+                return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 11460, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}ভুগজভ
             return {r['name']: r['weight'] * r['accuracy_factor'] for r in rows}
     except:
-        return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
+        return {'trend': 15, 'rsiফ্যদ': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
  
 def update_weights(symbol, indicators_status, win):
     try:
