@@ -2,10 +2,10 @@ import os
 import requests
 import time
 import numpy as np
- 
+
 from flask import Flask
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -15,17 +15,20 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import json
 from urllib.parse import quote
- 
+
+# --- TIMEZONE SETUP ---
+BD_TZ = timezone(timedelta(hours=6))
+
+def get_now():
+    return datetime.now(BD_TZ)
+
 # --- DATABASE SETUP ---
- 
+
 DATABASE_URL = "postgresql://neondb_owner:npg_axLci5T4ujdn@ep-patient-salad-atqhdzo2-pooler.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
- 
-# if not DATABASE_URL:
-#     raise Exception("DATABASE_URL not set. Please add it to environment variables.")
- 
+
 # Connection pool — প্রতি call-এ নতুন connection খোলার overhead নেই
 _pool = ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
- 
+
 @contextmanager
 def db_conn():
     conn = _pool.getconn()
@@ -36,7 +39,8 @@ def db_conn():
         raise
     finally:
         _pool.putconn(conn)
- 
+
+
 def init_db():
     try:
         with db_conn() as conn:
@@ -48,18 +52,24 @@ def init_db():
                     wins INTEGER DEFAULT 0,
                     losses INTEGER DEFAULT 0
                 );
-                CREATE TABLE IF NOT EXISTS active_trade (
-                    id INTEGER PRIMARY KEY DEFAULT 1,
+
+                CREATE TABLE IF NOT EXISTS trades (
+                    id SERIAL PRIMARY KEY,
                     symbol TEXT,
                     entry_price FLOAT,
                     side TEXT,
-                    start_time FLOAT,
-                    expiry_time FLOAT,
+                    start_time TIMESTAMP WITH TIME ZONE,
+                    expiry_time TIMESTAMP WITH TIME ZONE,
                     rec_time INTEGER,
-                    is_active BOOLEAN DEFAULT TRUE,
                     indicators_status JSONB,
-                    CONSTRAINT single_row CHECK (id = 1)
+                    status TEXT DEFAULT 'ACTIVE', -- 'ACTIVE', 'PENDING_RESULT', 'COMPLETED', 'FAILED'
+                    result TEXT DEFAULT 'PENDING',  -- 'PENDING', 'WIN', 'LOSS', 'UNAVAILABLE'
+                    retry_count INTEGER DEFAULT 0,
+                    next_retry_time TIMESTAMP WITH TIME ZONE,
+                    msg_sent BOOLEAN DEFAULT FALSE,
+                    result_sent BOOLEAN DEFAULT FALSE
                 );
+
                 CREATE TABLE IF NOT EXISTS indicator_weights (
                     symbol TEXT,
                     name TEXT,
@@ -67,6 +77,7 @@ def init_db():
                     accuracy_factor FLOAT DEFAULT 1.0,
                     PRIMARY KEY (symbol, name)
                 );
+
                 DO $$
                 DECLARE
                     sym TEXT;
@@ -90,7 +101,8 @@ def init_db():
             cur.close()
     except Exception as e:
         print(f"Database Init Error: {e}")
- 
+
+
 def get_stats():
     try:
         with db_conn() as conn:
@@ -102,7 +114,8 @@ def get_stats():
     except Exception as e:
         print(f"Get Stats Error: {e}")
         return {"total_trades": 0, "wins": 0, "losses": 0}
- 
+
+
 def update_stats(win=True):
     try:
         with db_conn() as conn:
@@ -115,7 +128,8 @@ def update_stats(win=True):
             cur.close()
     except Exception as e:
         print(f"Update Stats Error: {e}")
- 
+
+
 def get_weights(symbol):
     try:
         with db_conn() as conn:
@@ -124,11 +138,12 @@ def get_weights(symbol):
             rows = cur.fetchall()
             cur.close()
             if not rows:
-                return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 11460, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}ভুগজভ
+                return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
             return {r['name']: r['weight'] * r['accuracy_factor'] for r in rows}
     except:
-        return {'trend': 15, 'rsiফ্যদ': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
- 
+        return {'trend': 15, 'rsi': 10, 'bb': 10, 'vol': 10, 'adx': 5, 'ema_crossover': 10, 'macd': 15, 'atr': 10, 'vwap': 10, 'candle': 5}
+
+
 def update_weights(symbol, indicators_status, win):
     try:
         with db_conn() as conn:
@@ -145,43 +160,41 @@ def update_weights(symbol, indicators_status, win):
             cur.close()
     except Exception as e:
         print(f"Weight Update Error: {e}")
- 
+
+
 # --- Twelve Data API Settings ---
- 
+
 API_KEYS = [ "19e72ea9c60240e1a902f4d1ffa89508", "cb4aff90f22341809ae1344927c2a365", "2ca49ec0c0534851b8ee88bd01858eaf", "769c447e581d4592ad14f7023db745b3", "5d9e7b9a4a014dd38746242410e033e0", "76d81f1fba224b9e88015b34fdcc7f76", "c0bc2922d3c7486f8234dd67cd18b46a", "6a5adb88517744aba3a40c948404d0b9", ]
- 
+
 API_KEYS = [k for k in API_KEYS if k]
- 
+
 if not API_KEYS:
     raise Exception("No TwelveData API key found")
- 
+
 TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
 TELEGRAM_CHAT_ID = "6793328058"
- 
+
 SYMBOLS = [ "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "SOL/USD", "ADA/USD", "XAU/USD", "XAG/USD", "GBP/AUD", "EUR/AUD", "AUD/JPY", ]
- 
+
 app = Flask(__name__)
- 
+
 @app.route("/")
 def home():
     return "Trading AI Bot is running!"
- 
+
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
- 
-# প্রতি মিনিটে ৭টি key × ৩টি symbol = ২১টি market scan করা হয়
- 
-current_trade = None
+
+
 last_scan_minute = -1
 _last_sent = {"text": "", "ts": 0}
-_result_sent_for = None  # কোন trade-এর result ইতিমধ্যে পাঠানো হয়েছে তা track করে
- 
+
+
 def send_telegram_msg(message):
     global _last_sent
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    # একই message ৬০ সেকেন্দের মধ্যে দুইবার পাঠাবে না
     if message == _last_sent["text"] and time.time() - _last_sent["ts"] < 60:
         return
     _last_sent = {"text": message, "ts": time.time()}
@@ -191,7 +204,8 @@ def send_telegram_msg(message):
         requests.post(url, json=payload, timeout=10)
     except:
         pass
- 
+
+
 def calculate_ema_signal(df):
     if df is None or len(df) < 20:
         return "HOLD"
@@ -204,7 +218,8 @@ def calculate_ema_signal(df):
     elif last_row["EMA_FAST"] < last_row["EMA_SLOW"] and prev_row["EMA_FAST"] >= prev_row["EMA_SLOW"]:
         return "SELL"
     return "HOLD"
- 
+
+
 def calculate_indicators(values, symbol="EUR/USD"):
     if not values:
         return None
@@ -221,7 +236,6 @@ def calculate_indicators(values, symbol="EUR/USD"):
     df["high"]  = pd.to_numeric(df["high"],  errors="coerce")
     df["low"]   = pd.to_numeric(df["low"],   errors="coerce")
     df["open"]  = pd.to_numeric(df["open"],  errors="coerce")
-    # volume নাও থাকতে পারে (forex market এ), তাই default 0 দেওয়া হচ্ছে
     if "volume" not in df.columns:
         df["volume"] = 0.0
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
@@ -237,7 +251,6 @@ def calculate_indicators(values, symbol="EUR/USD"):
     deltas = np.diff(prices)
     gains  = np.where(deltas > 0, deltas, 0)
     losses = np.where(deltas < 0, -deltas, 0)
-    # Wilder's Smoothed Moving Average (classic RSI)
     avg_gain = np.mean(gains[:14])
     avg_loss = np.mean(losses[:14])
     for i in range(14, len(gains)):
@@ -267,7 +280,6 @@ def calculate_indicators(values, symbol="EUR/USD"):
     vwap_series    = (tp * volume_series).cumsum() / volume_series.replace(0, 1).cumsum()
     vwap_up        = bool(pd.Series(prices_series).iloc[-1] > vwap_series.iloc[-1])
     vol_spike = volume_series.iloc[-1] > volume_series.rolling(20).mean().iloc[-1] * 1.5
-    # Real ADX — Wilder's smoothing (14 period)
     high_arr = df["high"].values
     low_arr  = df["low"].values
     tr_arr   = tr.values
@@ -297,11 +309,9 @@ def calculate_indicators(values, symbol="EUR/USD"):
     else:
         adx_val = 0.0
     adx_weak = adx_val <= 25
-    # ADX ≤ 25 → trend দুর্বল
     side_ema = "BUY" if prices[-1] > sma_50 else "SELL"
     def rsi_signal(rsi_val, side):
         return (side == "BUY" and rsi_val < 40) or (side == "SELL" and rsi_val > 60)
-    # --- Real Candlestick Pattern Detection ---
     candle_pattern = False
     if len(df) >= 3:
         o1, h1, l1, c1 = df['open'].iloc[-3], df['high'].iloc[-3], df['low'].iloc[-3], df['close'].iloc[-3]
@@ -312,15 +322,11 @@ def calculate_indicators(values, symbol="EUR/USD"):
         body2        = abs(c2 - o2)
         upper_wick3  = h3 - max(o3, c3)
         lower_wick3  = min(o3, c3) - l3
-        # Doji: body খুব ছোট (range এর ১০% এর কম)
         doji              = (body3 / range3) < 0.1
-        # Pin Bar — Hammer (BUY) / Shooting Star (SELL)
         bullish_pin       = (lower_wick3 >= 2 * body3 and upper_wick3 <= body3 and side_ema == "BUY")
         bearish_pin       = (upper_wick3 >= 2 * body3 and lower_wick3 <= body3 and side_ema == "SELL")
-        # Engulfing
         bullish_engulfing = (c2 < o2 and c3 > o3 and o3 <= c2 and c3 >= o2 and side_ema == "BUY")
         bearish_engulfing = (c2 > o2 and c3 < o3 and o3 >= c2 and c3 <= o2 and side_ema == "SELL")
-        # Morning Star (BUY) / Evening Star (SELL)
         first_body    = abs(c1 - o1)
         morning_star  = (c1 < o1 and body2 < first_body * 0.3 and c3 > o3 and c3 > (o1 + c1) / 2 and side_ema == "BUY")
         evening_star  = (c1 > o1 and body2 < first_body * 0.3 and c3 < o3 and c3 < (o1 + c1) / 2 and side_ema == "SELL")
@@ -349,7 +355,7 @@ def calculate_indicators(values, symbol="EUR/USD"):
 def get_market_data(symbol, api_key):
     if not api_key:
         return None
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&outputsize=75&apikey={api_key.strip()}"
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&outputsize=75&timezone=Asia/Dhaka&apikey={api_key.strip()}"
     try:
         r = requests.get(url, timeout=15).json()
         if "values" in r:
@@ -363,7 +369,7 @@ def get_market_data(symbol, api_key):
 def get_batch_market_data(symbols_list, api_key):
     if not api_key or not symbols_list:
         return {}
-    url = f"https://api.twelvedata.com/time_series?symbol={quote(','.join(symbols_list), safe=',')}&interval=1min&outputsize=75&apikey={api_key.strip()}"
+    url = f"https://api.twelvedata.com/time_series?symbol={quote(','.join(symbols_list), safe=',')}&interval=1min&outputsize=75&timezone=Asia/Dhaka&apikey={api_key.strip()}"
     try:
         r = requests.get(url, timeout=30).json()
         result = {}
@@ -376,149 +382,209 @@ def get_batch_market_data(symbols_list, api_key):
     except Exception as e:
         print("Batch API Error:", e)
         return {}
- 
+
+
 def save_active_trade(trade):
     try:
         with db_conn() as conn:
-            cur = conn.cursor()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            # initial check is at expiry_time + 30 seconds
+            next_retry = trade['expiry_time'] + timedelta(seconds=30)
             cur.execute("""
-                INSERT INTO active_trade (id, symbol, entry_price, side, start_time, expiry_time, rec_time, is_active, indicators_status)
-                VALUES (1, %s, %s, %s, %s, %s, %s, TRUE, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    symbol = EXCLUDED.symbol, entry_price = EXCLUDED.entry_price, side = EXCLUDED.side,
-                    start_time = EXCLUDED.start_time, expiry_time = EXCLUDED.expiry_time,
-                    rec_time = EXCLUDED.rec_time, is_active = TRUE, indicators_status = EXCLUDED.indicators_status
+                INSERT INTO trades (
+                    symbol, entry_price, side, start_time, expiry_time, 
+                    rec_time, indicators_status, status, next_retry_time
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s)
+                RETURNING id
             """, (
                 trade['symbol'], trade['entry_price'], trade['side'],
-                trade['start_time'], trade['expiry_time'],
-                trade['rec_time'], json.dumps(trade['indicators_status'])
+                trade['start_time'], trade['expiry_time'], trade['rec_time'],
+                json.dumps(trade['indicators_status']), next_retry
             ))
+            row = cur.fetchone()
             conn.commit()
             cur.close()
-            return True
+            return row['id'] if row else None
     except Exception as e:
         print(f"Save Trade Error: {e}")
-        return False
- 
-def load_active_trade():
-    try:
-        with db_conn() as conn:
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT * FROM active_trade WHERE id = 1 AND is_active = TRUE")
-            row = cur.fetchone()
-            cur.close()
-            return row
-    except:
         return None
- 
-def clear_active_trade():
+
+
+def has_active_trade():
     try:
         with db_conn() as conn:
             cur = conn.cursor()
-            cur.execute("UPDATE active_trade SET is_active = FALSE WHERE id = 1")
-            conn.commit()
+            cur.execute("SELECT COUNT(*) FROM trades WHERE status = 'ACTIVE'")
+            row = cur.fetchone()
             cur.close()
-    except:
-        pass
- 
+            return row[0] > 0 if row else False
+    except Exception as e:
+        print(f"Error checking active trades: {e}")
+        return False
+
+
 def get_candle_at_time(symbol, target_time, api_key):
     values = get_market_data(symbol, api_key)
     if not values:
         return None
-    # UTC-based exact minute match — timezone mismatch ও wrong candle দুটোই বন্ধ
-    target_dt = datetime.utcfromtimestamp(int(target_time)).replace(second=0, microsecond=0)
+    
+    if isinstance(target_time, (int, float)):
+        target_dt = datetime.fromtimestamp(target_time, BD_TZ).replace(second=0, microsecond=0)
+    elif isinstance(target_time, datetime):
+        target_dt = target_time.astimezone(BD_TZ).replace(second=0, microsecond=0)
+    else:
+        return None
+
     for candle in values:
         try:
-            candle_dt = datetime.strptime(candle.get('datetime', ''), "%Y-%m-%d %H:%M:%S")
+            candle_dt = datetime.strptime(candle.get('datetime', ''), "%Y-%m-%d %H:%M:%S").replace(tzinfo=BD_TZ)
             if candle_dt.replace(second=0, microsecond=0) == target_dt:
                 return float(candle['close'])
         except:
             continue
-    return None  # exact match না পেলে None — caller fallback handle করবে
- 
+    return None
+
+
+def update_expired_trades():
+    # ACTIVE থেকে PENDING_RESULT-এ পরিণত করবে যা স্ক্যানারকে তাৎক্ষণিক নতুন সিগন্যাল খুঁজতে দেয়
+    now = get_now()
+    try:
+        with db_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE trades 
+                SET status = 'PENDING_RESULT' 
+                WHERE status = 'ACTIVE' AND expiry_time <= %s
+            """, (now,))
+            conn.commit()
+            cur.close()
+    except Exception as e:
+        print(f"Error transitioning expired trades: {e}")
+
+
 def check_result():
-    global current_trade, _result_sent_for
-    if not current_trade:
-        current_trade = load_active_trade()
-        if not current_trade:
-            return
-    now    = time.time()
-    expiry = current_trade['expiry_time']
- 
-    # Trade শেষ হওয়ার ৩০ সেকেন্ড পরে Result Check শুরু হবে
-    if now < expiry + 30:
+    update_expired_trades()
+    now = get_now()
+    try:
+        with db_conn() as conn:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("""
+                SELECT * FROM trades 
+                WHERE status = 'PENDING_RESULT' AND %s >= next_retry_time
+            """, (now,))
+            pending_trades = cur.fetchall()
+            cur.close()
+    except Exception as e:
+        print(f"Error fetching pending results: {e}")
         return
-    # এই trade-এর result আগেই পাঠানো হয়ে গেছে কিনা check করো
-    trade_key = f"{current_trade['symbol']}_{current_trade['start_time']}"
-    if trade_key == _result_sent_for:
-        clear_active_trade()
-        current_trade = None
-        return
- 
-    entry_key = os.getenv("RESULT_KEY_ENTRY", API_KEYS[0])
-    exit_key  = os.getenv("RESULT_KEY_EXIT", API_KEYS[1] if len(API_KEYS) > 1 else API_KEYS[0])
- 
-    entry_price = get_candle_at_time(current_trade['symbol'], current_trade['start_time'], entry_key)
-    exit_price  = get_candle_at_time(current_trade['symbol'], expiry, exit_key)
- 
-    if entry_price is None or exit_price is None:
-        # ৩০ সেকেন্ড পরপর ৪ বার চেষ্টা করবে
-        retry = int((now - (expiry + 30)) // 30)
- 
-        if retry < 4:
-            return
- 
-        if entry_price is None:
-            entry_price = float(current_trade['entry_price'])
-        if exit_price is None:
-            values      = get_market_data(current_trade['symbol'], exit_key)
-            exit_price  = float(values[0]['close']) if values else entry_price
- 
+
+    for trade in pending_trades:
+        trade_id = trade['id']
+        symbol = trade['symbol']
+        start_time = trade['start_time']
+        expiry = trade['expiry_time']
+        retry_count = trade['retry_count']
+        
+        entry_key = os.getenv("RESULT_KEY_ENTRY", API_KEYS[0])
+        exit_key  = os.getenv("RESULT_KEY_EXIT", API_KEYS[1] if len(API_KEYS) > 1 else API_KEYS[0])
+
+        entry_price = get_candle_at_time(symbol, start_time, entry_key)
+        exit_price  = get_candle_at_time(symbol, expiry, exit_key)
+
         if entry_price is None or exit_price is None:
-            send_telegram_msg(
-                f"⚠️ RESULT UNAVAILABLE\n\n"
-                f"Asset : {current_trade['symbol']}\n"
-                f"Result couldn't be verified after 4 attempts."
-            )
-            clear_active_trade()
-            current_trade = None
-            return
- 
-    win = (exit_price > entry_price) if current_trade['side'] == "BUY" else (exit_price < entry_price)
-    update_stats(win)
- 
-    if current_trade.get('indicators_status'):
-        status = current_trade['indicators_status']
-        if isinstance(status, str):
-            status = json.loads(status)
-        update_weights(current_trade['symbol'], status, win)
- 
-    s        = get_stats()
-    win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
-    result_emoji = "✅ WIN" if win else "❌ LOSS"
- 
-    entry_candle = datetime.fromtimestamp(current_trade['start_time']).strftime("%H:%M")
-    exit_candle = datetime.fromtimestamp(current_trade['expiry_time']).strftime("%H:%M")
- 
-    msg = (
-        f"🏁 TRADE RESULT\n\n"
-        f"📊 Asset: {current_trade['symbol']}\n"
-        f"🏆 Result: {result_emoji}\n"
-        f"🚀 Entry: {entry_price}\n"
-        f"🕒 Entry Candle: {entry_candle}\n\n"
-        f"🏁 Exit: {exit_price}\n"
-        f"🕒 Exit Candle: {exit_candle}\n"
-        f"📈 Win Rate: {win_rate:.1f}%"
-    )
-    trade_symbol    = current_trade['symbol']
-    _result_sent_for = trade_key  # এই trade process করা হয়ে গেছে, আর পাঠাবে না
- 
-    send_telegram_msg(msg)
- 
-    clear_active_trade()
-    current_trade = None
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Verified Result: {trade_symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
- 
+            new_retry = retry_count + 1
+            if new_retry < 4:
+                # পরবর্তী রিট্রাই ৩০ সেকেন্ড পর সেট করবে
+                next_retry = now + timedelta(seconds=30)
+                try:
+                    with db_conn() as conn:
+                        cur = conn.cursor()
+                        cur.execute("""
+                            UPDATE trades 
+                            SET retry_count = %s, next_retry_time = %s 
+                            WHERE id = %s
+                        """, (new_retry, next_retry, trade_id))
+                        conn.commit()
+                        cur.close()
+                except Exception as e:
+                    print(f"Error updating retry count: {e}")
+                continue
+            else:
+                # ৪ বার চেষ্টার পরও ডেটা না পেলে ফলব্যাক পদ্ধতিতে চেক করবে
+                if entry_price is None:
+                    entry_price = float(trade['entry_price'])
+                if exit_price is None:
+                    values = get_market_data(symbol, exit_key)
+                    exit_price = float(values[0]['close']) if values else entry_price
+
+                if entry_price is None or exit_price is None:
+                    try:
+                        with db_conn() as conn:
+                            cur = conn.cursor()
+                            cur.execute("""
+                                UPDATE trades 
+                                SET status = 'FAILED', result = 'UNAVAILABLE', result_sent = TRUE 
+                                WHERE id = %s
+                            """, (trade_id,))
+                            conn.commit()
+                            cur.close()
+                    except:
+                        pass
+                    
+                    send_telegram_msg(
+                        f"⚠️ RESULT UNAVAILABLE\n\n"
+                        f"Asset : {symbol}\n"
+                        f"Result couldn't be verified after 4 attempts."
+                    )
+                    continue
+
+        win = (exit_price > entry_price) if trade['side'] == "BUY" else (exit_price < entry_price)
+        update_stats(win)
+
+        indicators_status = trade['indicators_status']
+        if isinstance(indicators_status, str):
+            try:
+                indicators_status = json.loads(indicators_status)
+            except:
+                indicators_status = {}
+        if indicators_status:
+            update_weights(symbol, indicators_status, win)
+
+        s = get_stats()
+        win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
+        result_emoji = "✅ WIN" if win else "❌ LOSS"
+
+        entry_candle = start_time.astimezone(BD_TZ).strftime("%H:%M")
+        exit_candle = expiry.astimezone(BD_TZ).strftime("%H:%M")
+
+        msg = (
+            f"🏁 TRADE RESULT\n\n"
+            f"📊 Asset: {symbol}\n"
+            f"🏆 Result: {result_emoji}\n"
+            f"🚀 Entry: {entry_price:.5f}\n"
+            f"🕒 Entry Candle: {entry_candle}\n\n"
+            f"🏁 Exit: {exit_price:.5f}\n"
+            f"🕒 Exit Candle: {exit_candle}\n"
+            f"📈 Win Rate: {win_rate:.1f}%"
+        )
+
+        try:
+            with db_conn() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    UPDATE trades 
+                    SET status = 'COMPLETED', result = %s, result_sent = TRUE 
+                    WHERE id = %s
+                """, ("WIN" if win else "LOSS", trade_id))
+                conn.commit()
+                cur.close()
+        except Exception as e:
+            print(f"Error marking trade as completed: {e}")
+
+        send_telegram_msg(msg)
+        print(f"[{get_now().strftime('%H:%M:%S')}] Verified Result: {symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
+
+
 def fetch_and_analyze_batch(symbols_chunk, api_key):
     batch_data = get_batch_market_data(symbols_chunk, api_key)
     results    = []
@@ -552,15 +618,18 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
     return results
  
 def run_scanner():
-    global current_trade, last_scan_minute
-    now = datetime.now()
+    global last_scan_minute
+    now = get_now()
     if now.minute == last_scan_minute or not (0 <= now.second <= 10):
         return
     last_scan_minute = now.minute
+    
+    if has_active_trade():
+        print(f"[{now.strftime('%H:%M:%S')}] Active trade in progress. Scanning skipped.")
+        return
+
     print(f"[{now.strftime('%H:%M:%S')}] Scanning markets for signals...")
- 
     all_results = []
-    # প্রতিটি key-এ ৩টি symbol batch — ৭টি key × ৩টি = ২১টি market
     chunks = [SYMBOLS[i:i + 3] for i in range(0, len(SYMBOLS), 3)]
     with ThreadPoolExecutor(max_workers=7) as executor:
         futures = [
@@ -578,31 +647,29 @@ def run_scanner():
         max_score = sum(weights.values())
         conf      = round(min((best['score'] / max_score * 100) if max_score > 0 else 0, 99.0), 1)
         action    = "Strong trade" if conf >= 80 else "Normal trade" if conf >= 60 else "Weak / scalp" if conf >= 40 else "Educational"
-        # ATR % of price দিয়ে volatility measure করি
         atr_val = best['ind']['atr_val']
         curr_p  = best['curr_p']
         atr_pct = (atr_val / curr_p * 100) if curr_p > 0 else 0.2
-        # High volatility → trade দ্রুত resolve হয় → ছোট expiry
-        # Low volatility  → market ধীরে move করে → বড় expiry
-        if atr_pct > 0.3:       # High volatility
+        if atr_pct > 0.3:
             rec_time = 5 if conf <= 60 else 7
-        elif atr_pct > 0.1:     # Medium volatility
+        elif atr_pct > 0.1:
             rec_time = 8 if conf <= 60 else 10
-        else:                   # Low volatility
+        else:
             rec_time = 12 if conf <= 60 else 15
-        start  = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=1)
+        start  = get_now().replace(second=0, microsecond=0) + timedelta(minutes=1)
         expiry = start + timedelta(minutes=rec_time)
-        current_trade = {
+        
+        trade_data = {
             'symbol':            best['symbol'],
             'entry_price':       best['curr_p'],
             'side':              best['side'],
-            'start_time':        start.timestamp(),
-            'expiry_time':       expiry.timestamp(),
+            'start_time':        start,
+            'expiry_time':       expiry,
             'rec_time':          rec_time,
             'indicators_status': best['status']
         }
-        saved = save_active_trade(current_trade)
-        if saved:  # DB-তে save সফল হলে তবেই message পাঠাবে
+        saved_id = save_active_trade(trade_data)
+        if saved_id:
             entry_time = start.strftime("%H:%M")
             entry_candle = start.strftime("%H:%M")
             msg = (
@@ -615,6 +682,14 @@ def run_scanner():
                 f"Place trade on Quotex exactly at the start of next minute (00s)!"
             )
             send_telegram_msg(msg)
+            try:
+                with db_conn() as conn:
+                    cur = conn.cursor()
+                    cur.execute("UPDATE trades SET msg_sent = TRUE WHERE id = %s", (saved_id,))
+                    conn.commit()
+                    cur.close()
+            except:
+                pass
  
 if __name__ == "__main__":
     init_db()
