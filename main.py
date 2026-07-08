@@ -247,22 +247,31 @@ def run_web():
 
 
 last_scan_minute = -1
-_last_sent = {"text": "", "ts": 0}
+_sent_messages_cache = {} # message_text -> timestamp (to block duplicate messages)
 
 
 def send_telegram_msg(message):
-    global _last_sent
+    global _sent_messages_cache
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    if message == _last_sent["text"] and time.time() - _last_sent["ts"] < 60:
+    now = time.time()
+    
+    # Clean up old cached messages (older than 10 minutes)
+    _sent_messages_cache = {msg: ts for msg, ts in _sent_messages_cache.items() if now - ts < 600}
+    
+    # Duplicate strict check
+    if message in _sent_messages_cache:
+        logger.warning("Duplicate Telegram message transmission blocked.")
         return
-    _last_sent = {"text": message, "ts": time.time()}
+        
+    _sent_messages_cache[message] = now
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
         requests.post(url, json=payload, timeout=10)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to send Telegram message: {e}")
 
 
 def calculate_ema_signal(df):
@@ -570,10 +579,10 @@ def is_high_impact_news_near(symbol, buffer_minutes=30):
 
 # --- Machine Learning System (Pure-Numpy Logistic Regression Classifier) ---
 ML_WEIGHTS = {
-    'weights': np.zeros(10),
+    'weights': np.zeros(11),
     'bias': 0.0,
-    'means': np.zeros(10),
-    'stds': np.ones(10),
+    'means': np.zeros(11),
+    'stds': np.ones(11),
     'trained': False
 }
 
@@ -586,7 +595,7 @@ def train_ml_model():
                 SELECT indicators_status, result 
                 FROM trades 
                 WHERE status = 'COMPLETED' AND result IN ('WIN', 'LOSS')
-                ORDER BY id DESC LIMIT 500
+                ORDER BY id ASC
             """)
             rows = cur.fetchall()
             cur.close()
@@ -594,11 +603,11 @@ def train_ml_model():
             logger.info(f"ML Model training skipped. Insufficient trade history ({len(rows)}/10 required).")
             return
             
-        feature_names = ['rsi_num', 'adx_num', 'atr_num', 'ema_dist', 'vol_ratio', 'sr_dist', 'macd_hist', 'bb_width', 'vwap_dist', 'candle_num']
+        feature_names = ['RSI', 'ADX', 'ATR', 'EMA Distance', 'Volume Ratio', 'Support Distance', 'Resistance Distance', 'MACD Histogram', 'BB Width', 'VWAP Distance', 'Candle Pattern']
         fallbacks = {
-            'rsi_num': 50.0, 'adx_num': 20.0, 'atr_num': 0.001, 'ema_dist': 0.0, 
-            'vol_ratio': 1.0, 'sr_dist': 0.001, 'macd_hist': 0.0, 'bb_width': 0.01, 
-            'vwap_dist': 0.0, 'candle_num': 0.0
+            'RSI': 50.0, 'ADX': 20.0, 'ATR': 0.001, 'EMA Distance': 0.0, 
+            'Volume Ratio': 1.0, 'Support Distance': 0.001, 'Resistance Distance': 0.001, 
+            'MACD Histogram': 0.0, 'BB Width': 0.01, 'VWAP Distance': 0.0, 'Candle Pattern': 0.0
         }
         
         X, y = [], []
@@ -612,17 +621,17 @@ def train_ml_model():
             if not status:
                 continue
             
-            # Map feature numeric values with backwards-compatible fallback handling
+            # Map features with strict numeric backwards-compatibility
             vec = []
             for fname in feature_names:
                 val = status.get(fname)
                 if val is None:
-                    # Compatibility with old boolean formats
-                    if fname == 'rsi_num' and 'rsi' in status:
+                    # Compatibility with old boolean mappings
+                    if fname == 'RSI' and 'rsi' in status:
                         val = 30.0 if status['rsi'] else 50.0
-                    elif fname == 'adx_num' and 'adx' in status:
+                    elif fname == 'ADX' and 'adx' in status:
                         val = 30.0 if status['adx'] else 15.0
-                    elif fname == 'candle_num' and 'candle' in status:
+                    elif fname == 'Candle Pattern' and 'candle' in status:
                         val = 1.0 if status['candle'] else 0.0
                     else:
                         val = fallbacks[fname]
@@ -639,13 +648,13 @@ def train_ml_model():
         if len(X) < 10:
             return
             
-        # Normalization (Z-Score)
+        # Z-Score Normalization
         means = np.mean(X, axis=0)
         stds = np.std(X, axis=0)
-        stds[stds == 0] = 1e-8 # Division by zero lock
+        stds[stds == 0] = 1e-8 # Standard division safeguard
         X_scaled = (X - means) / stds
         
-        # Logistic Regression Gradient Descent
+        # Logistic Regression Training
         num_features = X_scaled.shape[1]
         W = np.zeros(num_features)
         b = 0.0
@@ -667,7 +676,7 @@ def train_ml_model():
         ML_WEIGHTS['means'] = means
         ML_WEIGHTS['stds'] = stds
         ML_WEIGHTS['trained'] = True
-        logger.info(f"ML Model trained successfully on {len(X)} unique trades. Bias: {b}")
+        logger.info(f"ML Model trained successfully on {len(X)} sequential trades. Previous learnings preserved.")
     except Exception as e:
         logger.error(f"ML Training Error: {e}")
 
@@ -675,11 +684,11 @@ def predict_win_probability(indicators_status):
     global ML_WEIGHTS
     if not ML_WEIGHTS['trained']:
         return 0.5
-    feature_names = ['rsi_num', 'adx_num', 'atr_num', 'ema_dist', 'vol_ratio', 'sr_dist', 'macd_hist', 'bb_width', 'vwap_dist', 'candle_num']
+    feature_names = ['RSI', 'ADX', 'ATR', 'EMA Distance', 'Volume Ratio', 'Support Distance', 'Resistance Distance', 'MACD Histogram', 'BB Width', 'VWAP Distance', 'Candle Pattern']
     fallbacks = {
-        'rsi_num': 50.0, 'adx_num': 20.0, 'atr_num': 0.001, 'ema_dist': 0.0, 
-        'vol_ratio': 1.0, 'sr_dist': 0.001, 'macd_hist': 0.0, 'bb_width': 0.01, 
-        'vwap_dist': 0.0, 'candle_num': 0.0
+        'RSI': 50.0, 'ADX': 20.0, 'ATR': 0.001, 'EMA Distance': 0.0, 
+        'Volume Ratio': 1.0, 'Support Distance': 0.001, 'Resistance Distance': 0.001, 
+        'MACD Histogram': 0.0, 'BB Width': 0.01, 'VWAP Distance': 0.0, 'Candle Pattern': 0.0
     }
     vec = []
     for fname in feature_names:
@@ -845,7 +854,7 @@ def check_result():
             cur = conn.cursor(cursor_factory=RealDictCursor)
             cur.execute("""
                 SELECT * FROM trades 
-                WHERE status = 'PENDING_RESULT' AND %s >= next_retry_time
+                WHERE status = 'PENDING_RESULT' AND result_sent = FALSE AND %s >= next_retry_time
             """, (now,))
             pending_trades = cur.fetchall()
             cur.close()
@@ -910,7 +919,7 @@ def check_result():
         win = (exit_price > entry_price) if trade['side'] == "BUY" else (exit_price < entry_price)
         
         # --- ATOMIC STATE LOCK ---
-        # মেসেজ পাঠানোর পূর্বে ডাটাবেজে COMPLETED ও SENT স্ট্যাটাস আপডেট করে ডুপ্লিকেট মেসেজ পাঠানো আটকাবে
+        # মেসেজ পাঠানোর পূর্বেই ডাটাবেজে রেকর্ডটি COMPLETED ও result_sent = TRUE করে ডুপ্লিকেট মেসেজ পাঠানো শতভাগ আটকাবে।
         try:
             with db_conn() as conn:
                 cur = conn.cursor()
@@ -923,7 +932,7 @@ def check_result():
                 cur.close()
         except Exception as e:
             logger.error(f"Error updating database completion lock for trade {trade_id}: {e}")
-            continue # ডাটাবেজ আপডেট ব্যর্থ হলে ডুপ্লিকেট প্রসেসিং এড়াতে প্রসেস স্কিপ করবে
+            continue # ডাটাবেজ আপডেট ব্যর্থ হলে ডুপ্লিকেট প্রসেস এড়াতে লুপের পরবর্তী ধাপে চলে যাবে
             
         update_stats(win)
         indicators_status = trade['indicators_status']
@@ -1022,21 +1031,22 @@ def check_and_send_daily_report():
             else:
                 ml_status = "POOR"
                 
+            # হুবহু ব্যবহারকারীর দেওয়া ডাবল-স্পেসিং ও ফরম্যাট বজায় রাখা হয়েছে
             msg = (
                 f"🤖 ML DAILY REPORT\n\n"
                 f"Date: {current_date_str}\n\n"
-                f"Total Predictions: {total_predictions}\n"
+                f"Total Predictions: {total_predictions}\n\n"
                 f"Correct: {correct}\n"
-                f"Wrong: {wrong}\n"
+                f"Wrong: {wrong}\n\n"
                 f"Accuracy: {accuracy:.1f}%\n\n"
                 f"High Confidence Signals:\n"
                 f"80%-100%\n"
                 f"Taken: {high_taken}\n"
                 f"Wins: {high_wins}\n"
-                f"Win Rate: {high_win_rate:.1f}%\n\n"
+                f"Win Rate: {high_win_rate:.0f}%\n\n"
                 f"Medium Confidence:\n"
                 f"60%-80%\n"
-                f"Win Rate: {med_win_rate:.1f}%\n\n"
+                f"Win Rate: {med_win_rate:.0f}%\n\n"
                 f"ML Status:\n"
                 f"{ml_status}"
             )
@@ -1081,7 +1091,7 @@ def fetch_and_analyze_batch(symbols_chunk, api_key, htf_trends):
             continue
         side_ema = "BUY" if ind['curr_p'] > ind['sma_50'] else "SELL"
         
-        # Boolean ও Numeric ফিচারগুলোর সমন্বিত ডিকশনারি
+        # সমন্বিত ডিকশনারি (বুলিয়ান ও সংখ্যাগত মান উভয়ই সংরক্ষিত থাকবে)
         status = {
             # Boolean indicators for weight tuning (Compatibility)
             'trend':        bool((ind['trend_up'] and ind['curr_p'] > ind['sma_50']) or (not ind['trend_up'] and ind['curr_p'] < ind['sma_50'])),
@@ -1096,16 +1106,17 @@ def fetch_and_analyze_batch(symbols_chunk, api_key, htf_trends):
             'candle':       bool(ind['candle_signal']),
             
             # Rich numeric features for accurate Machine Learning prediction
-            'rsi_num':      float(ind['rsi']),
-            'adx_num':      float(ind['adx_val']),
-            'atr_num':      float(ind['atr_val']),
-            'ema_dist':     float(ind['ema_dist']),
-            'vol_ratio':    float(ind['vol_ratio']),
-            'sr_dist':      float(ind['sr_dist']),
-            'macd_hist':    float(ind['macd_hist_val']),
-            'bb_width':     float(ind['bb_width']),
-            'vwap_dist':    float(ind['vwap_dist']),
-            'candle_num':   1.0 if ind['candle_signal'] else 0.0
+            'RSI':               float(ind['rsi']),
+            'ADX':               float(ind['adx_val']),
+            'ATR':               float(ind['atr_val']),
+            'EMA Distance':      float(ind['ema_dist']),
+            'Volume Ratio':      float(ind['vol_ratio']),
+            'Support Distance':  float(abs(ind['curr_p'] - ind['support'])),
+            'Resistance Distance': float(abs(ind['curr_p'] - ind['resistance'])),
+            'MACD Histogram':    float(ind['macd_hist_val']),
+            'BB Width':          float(ind['bb_width']),
+            'VWAP Distance':     float(ind['vwap_dist']),
+            'Candle Pattern':    1.0 if ind['candle_signal'] else 0.0
         }
         
         htf = htf_trends.get(symbol, {"5m": "NEUTRAL", "15m": "NEUTRAL"})
