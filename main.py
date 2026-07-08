@@ -2,6 +2,7 @@ import os
 import requests
 import time
 import numpy as np
+import logging
 
 from flask import Flask
 import threading
@@ -15,6 +16,16 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import json
 from urllib.parse import quote
+
+# --- LOGGING SETUP ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("TradingBot")
 
 # --- TIMEZONE SETUP ---
 BD_TZ = timezone(timedelta(hours=6))
@@ -70,6 +81,20 @@ def init_db():
                     result_sent BOOLEAN DEFAULT FALSE
                 );
 
+                CREATE TABLE IF NOT EXISTS trades_archive (
+                    id INTEGER PRIMARY KEY,
+                    symbol TEXT,
+                    entry_price FLOAT,
+                    side TEXT,
+                    start_time TIMESTAMP WITH TIME ZONE,
+                    expiry_time TIMESTAMP WITH TIME ZONE,
+                    rec_time INTEGER,
+                    indicators_status JSONB,
+                    status TEXT,
+                    result TEXT,
+                    archived_at TIMESTAMP WITH TIME ZONE
+                );
+
                 CREATE TABLE IF NOT EXISTS indicator_weights (
                     symbol TEXT,
                     name TEXT,
@@ -77,6 +102,11 @@ def init_db():
                     accuracy_factor FLOAT DEFAULT 1.0,
                     PRIMARY KEY (symbol, name)
                 );
+
+                -- Database performance optimizations
+                CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+                CREATE INDEX IF NOT EXISTS idx_trades_expiry ON trades(expiry_time);
+                CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 
                 DO $$
                 DECLARE
@@ -99,8 +129,10 @@ def init_db():
                 cur.execute("INSERT INTO trading_stats (total_trades, wins, losses) VALUES (0, 0, 0)")
             conn.commit()
             cur.close()
+        logger.info("Database initialized successfully.")
+        train_ml_model() # বুটআপে এমএল মডেল ট্রেনআপ
     except Exception as e:
-        print(f"Database Init Error: {e}")
+        logger.error(f"Database Init Error: {e}")
 
 
 def get_stats():
@@ -112,7 +144,7 @@ def get_stats():
             cur.close()
             return row if row else {"total_trades": 0, "wins": 0, "losses": 0}
     except Exception as e:
-        print(f"Get Stats Error: {e}")
+        logger.error(f"Get Stats Error: {e}")
         return {"total_trades": 0, "wins": 0, "losses": 0}
 
 
@@ -127,7 +159,7 @@ def update_stats(win=True):
             conn.commit()
             cur.close()
     except Exception as e:
-        print(f"Update Stats Error: {e}")
+        logger.error(f"Update Stats Error: {e}")
 
 
 def get_weights(symbol):
@@ -158,23 +190,47 @@ def update_weights(symbol, indicators_status, win):
                     """, (factor_change, symbol, name))
             conn.commit()
             cur.close()
+        train_ml_model() # ডাটাবেজে নতুন ইতিহাস আসার সাথে সাথে ML পুনরায় ট্রেন হবে
     except Exception as e:
-        print(f"Weight Update Error: {e}")
+        logger.error(f"Weight Update Error: {e}")
 
 
-# --- Twelve Data API Settings ---
+# --- Twelve Data API Settings & Failover ---
 
-API_KEYS = [ "19e72ea9c60240e1a902f4d1ffa89508", "cb4aff90f22341809ae1344927c2a365", "2ca49ec0c0534851b8ee88bd01858eaf", "769c447e581d4592ad14f7023db745b3", "5d9e7b9a4a014dd38746242410e033e0", "76d81f1fba224b9e88015b34fdcc7f76", "c0bc2922d3c7486f8234dd67cd18b46a", "6a5adb88517744aba3a40c948404d0b9", ]
-
+API_KEYS = [ "19e72ea9c60240e1a902f4d1ffa89508", "cb4aff90f22341809ae1344927c2a365", "2ca49ec0c0534851b8ee88bd01858eaf", "769c447e581d4592ad14f7023db745b3", "5d9e7b9a4a014dd38746242410e033e0", "76d81f1fba224b9e88015b34fdcc7f76", "c0bc2922d3c7486f8234dd67cd18b46a", "6a5adb88517744aba3a40c948404d0b9" ]
 API_KEYS = [k for k in API_KEYS if k]
 
 if not API_KEYS:
     raise Exception("No TwelveData API key found")
 
+current_key_idx = 0
+key_cooldowns = {} # key -> timestamp when it can be used again
+
+def get_active_api_key():
+    global current_key_idx
+    now = time.time()
+    for _ in range(len(API_KEYS)):
+        key = API_KEYS[current_key_idx]
+        if key_cooldowns.get(key, 0) < now:
+            return key
+        current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+    # সব কি কুলডাউনে থাকলে সবচেয়ে কম কুলডাউন থাকা কি-টি নেওয়া হবে
+    sorted_keys = sorted(API_KEYS, key=lambda k: key_cooldowns.get(k, 0))
+    return sorted_keys[0]
+
+def mark_key_cooldown(key, duration=300):
+    key_cooldowns[key] = time.time() + duration
+    logger.warning(f"Key {key[:6]}... put on cooldown for {duration}s due to Rate Limit (429) or API error.")
+
+def rotate_key():
+    global current_key_idx
+    current_key_idx = (current_key_idx + 1) % len(API_KEYS)
+
+
 TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
 TELEGRAM_CHAT_ID = "6793328058"
 
-SYMBOLS = [ "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "SOL/USD", "ADA/USD", "XAU/USD", "XAG/USD", "GBP/AUD", "EUR/AUD", "AUD/JPY", ]
+SYMBOLS = [ "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP", "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "SOL/USD", "ADA/USD", "XAU/USD", "XAG/USD", "GBP/AUD", "EUR/AUD", "AUD/JPY" ]
 
 app = Flask(__name__)
 
@@ -262,11 +318,24 @@ def calculate_indicators(values, symbol="EUR/USD"):
     upper, lower = sma_20 + (2 * std_20), sma_20 - (2 * std_20)
     sma_50    = np.mean(prices[-50:])
     trend_up  = prices[-1] > sma_50
+    
+    # --- Trend Filter: EMA 50 & EMA 200 ---
+    ema_50 = prices_series.ewm(span=50, adjust=False).mean().iloc[-1]
+    if len(prices_series) >= 200:
+        ema_200 = prices_series.ewm(span=200, adjust=False).mean().iloc[-1]
+    else:
+        ema_200 = ema_50 # Fallback
+        
     ema_12      = pd.Series(prices_series).ewm(span=12, adjust=False).mean()
     ema_26      = pd.Series(prices_series).ewm(span=26, adjust=False).mean()
     macd_line   = ema_12 - ema_26
     signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean()
     macd_up     = bool(macd_line.iloc[-1] > signal_line.iloc[-1])
+    
+    # --- MACD Histogram Slope ---
+    macd_hist = macd_line - signal_line
+    macd_hist_slope_up = bool(macd_hist.iloc[-1] > macd_hist.iloc[-2]) if len(macd_hist) > 1 else False
+    
     high_series, low_series = pd.Series(df["high"]), pd.Series(df["low"])
     tr = pd.concat([
         (high_series - low_series),
@@ -294,14 +363,15 @@ def calculate_indicators(values, symbol="EUR/USD"):
     s_pdm = float(np.sum(plus_dm[1:15]))
     s_mdm = float(np.sum(minus_dm[1:15]))
     dx_vals = []
+    pdi_val, mdi_val = 0.0, 0.0
     for i in range(15, len(tr_arr)):
         s_tr  = s_tr  - s_tr  / 14 + tr_arr[i]
         s_pdm = s_pdm - s_pdm / 14 + plus_dm[i]
         s_mdm = s_mdm - s_mdm / 14 + minus_dm[i]
-        pdi    = 100 * s_pdm / s_tr if s_tr else 0.0
-        mdi    = 100 * s_mdm / s_tr if s_tr else 0.0
-        di_sum = pdi + mdi
-        dx_vals.append(100 * abs(pdi - mdi) / di_sum if di_sum else 0.0)
+        pdi_val    = 100 * s_pdm / s_tr if s_tr else 0.0
+        mdi_val    = 100 * s_mdm / s_tr if s_tr else 0.0
+        di_sum = pdi_val + mdi_val
+        dx_vals.append(100 * abs(pdi_val - mdi_val) / di_sum if di_sum else 0.0)
     if len(dx_vals) >= 14:
         adx_val = float(np.mean(dx_vals[:14]))
         for v in dx_vals[14:]:
@@ -310,6 +380,14 @@ def calculate_indicators(values, symbol="EUR/USD"):
         adx_val = 0.0
     adx_weak = adx_val <= 25
     side_ema = "BUY" if prices[-1] > sma_50 else "SELL"
+    
+    # --- Support / Resistance & Swing High / Low ---
+    recent_closes = prices[-30:]
+    support = min(recent_closes)
+    resistance = max(recent_closes)
+    swing_high = float(max(df["high"].iloc[-20:]))
+    swing_low = float(min(df["low"].iloc[-20:]))
+    
     def rsi_signal(rsi_val, side):
         return (side == "BUY" and rsi_val < 40) or (side == "SELL" and rsi_val > 60)
     candle_pattern = False
@@ -349,46 +427,276 @@ def calculate_indicators(values, symbol="EUR/USD"):
         "rsi": rsi, "upper": upper, "lower": lower, "sma_50": sma_50, "trend_up": trend_up,
         "vol_spike": vol_spike, "adx_low": adx_weak, "curr_p": prices[-1], "ema_sig": ema_sig,
         "macd_up": macd_up, "volatility_low": volatility_low, "vwap_up": vwap_up,
-        "candle_signal": candle_pattern, "atr_val": atr_val, "symbol_confidence": symbol_confidence
+        "candle_signal": candle_pattern, "atr_val": atr_val, "symbol_confidence": symbol_confidence,
+        "adx_val": adx_val, "plus_di": pdi_val, "minus_di": mdi_val, "ema_50": ema_50, "ema_200": ema_200,
+        "macd_hist_slope_up": macd_hist_slope_up, "support": support, "resistance": resistance,
+        "swing_high": swing_high, "swing_low": swing_low
     }
- 
+
+
 def get_market_data(symbol, api_key):
-    if not api_key:
-        return None
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&outputsize=75&timezone=Asia/Dhaka&apikey={api_key.strip()}"
-    try:
-        r = requests.get(url, timeout=15).json()
-        if "values" in r:
-            return r["values"]
-        if symbol in r and "values" in r[symbol]:
-            return r[symbol]["values"]
-        return None
-    except:
-        return None
- 
-def get_batch_market_data(symbols_list, api_key):
-    if not api_key or not symbols_list:
+    # Single standard API request utilizing rotated batch mechanism
+    res = get_batch_market_data([symbol], interval="1min")
+    return res.get(symbol)
+
+
+def get_batch_market_data(symbols_list, interval="1min"):
+    if not symbols_list:
         return {}
-    url = f"https://api.twelvedata.com/time_series?symbol={quote(','.join(symbols_list), safe=',')}&interval=1min&outputsize=75&timezone=Asia/Dhaka&apikey={api_key.strip()}"
+    retries = 3
+    backoff = 2
+    for attempt in range(retries):
+        api_key = get_active_api_key()
+        url = f"https://api.twelvedata.com/time_series?symbol={quote(','.join(symbols_list), safe=',')}&interval={interval}&outputsize=250&timezone=Asia/Dhaka&apikey={api_key.strip()}"
+        try:
+            r = requests.get(url, timeout=20)
+            if r.status_code == 429:
+                mark_key_cooldown(api_key, duration=300)
+                rotate_key()
+                continue
+            r.raise_for_status()
+            res_json = r.json()
+            if "status" in res_json and res_json["status"] == "error":
+                if "rate limit" in res_json.get("message", "").lower():
+                    mark_key_cooldown(api_key, duration=300)
+                rotate_key()
+                continue
+            result = {}
+            for symbol in symbols_list:
+                if symbol in res_json and "values" in res_json[symbol]:
+                    result[symbol] = res_json[symbol]["values"]
+                elif "values" in res_json and len(symbols_list) == 1:
+                    result[symbol] = res_json["values"]
+            return result
+        except Exception as e:
+            logger.error(f"Batch API Error on attempt {attempt+1} for symbols {symbols_list}: {e}")
+            rotate_key()
+            time.sleep(backoff)
+            backoff *= 2
+    return {}
+
+
+# --- Higher Timeframe Trend Analysis (5m/15m) ---
+def get_htf_trends(symbols_list):
+    trends = {}
+    data_5m = get_batch_market_data(symbols_list, interval="5min")
+    data_15m = get_batch_market_data(symbols_list, interval="15min")
+    for symbol in symbols_list:
+        trend_5m = "NEUTRAL"
+        trend_15m = "NEUTRAL"
+        vals_5m = data_5m.get(symbol)
+        if vals_5m and len(vals_5m) >= 20:
+            closes = [float(x['close']) for x in vals_5m[::-1]]
+            sma_20 = np.mean(closes[-20:])
+            trend_5m = "UP" if closes[-1] > sma_20 else "DOWN"
+        vals_15m = data_15m.get(symbol)
+        if vals_15m and len(vals_15m) >= 20:
+            closes = [float(x['close']) for x in vals_15m[::-1]]
+            sma_20 = np.mean(closes[-20:])
+            trend_15m = "UP" if closes[-1] > sma_20 else "DOWN"
+        trends[symbol] = {"5m": trend_5m, "15m": trend_15m}
+    return trends
+
+
+# --- News Calendar Parsing Filter ---
+NEWS_CACHE = {
+    "last_fetched": 0,
+    "events": []
+}
+
+def fetch_economic_calendar():
+    global NEWS_CACHE
+    now = time.time()
+    # ১ ঘণ্টার ক্যাশ যাতে লিমিট না হারায় এবং Forex Factory-র পলিসি রক্ষা পায়
+    if now - NEWS_CACHE["last_fetched"] < 3600 and NEWS_CACHE["events"]:
+        return NEWS_CACHE["events"]
+    url = "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"
     try:
-        r = requests.get(url, timeout=30).json()
-        result = {}
-        for symbol in symbols_list:
-            if symbol in r and "values" in r[symbol]:
-                result[symbol] = r[symbol]["values"]
-            elif "values" in r and len(symbols_list) == 1:
-                result[symbol] = r["values"]
-        return result
+        logger.info("Fetching weekly economic calendar from ForexFactory CDN...")
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        events = response.json()
+        NEWS_CACHE["events"] = events
+        NEWS_CACHE["last_fetched"] = now
+        logger.info(f"Loaded {len(events)} news events successfully.")
+        return events
     except Exception as e:
-        print("Batch API Error:", e)
-        return {}
+        logger.error(f"Failed to fetch economic calendar: {e}")
+        return NEWS_CACHE["events"]
+
+def is_high_impact_news_near(symbol, buffer_minutes=30):
+    events = fetch_economic_calendar()
+    if not events:
+        return False, ""
+    currencies = [c.strip().upper() for c in symbol.split("/")]
+    now = get_now()
+    for event in events:
+        impact = event.get("impact", "")
+        if impact != "High":
+            continue
+        country = event.get("country", "").upper()
+        if country not in currencies:
+            continue
+        event_date_str = event.get("date")
+        if not event_date_str:
+            continue
+        try:
+            event_dt = datetime.fromisoformat(event_date_str.replace("Z", "+00:00"))
+            diff = abs((event_dt - now).total_seconds()) / 60.0
+            if diff <= buffer_minutes:
+                title = event.get("title", "High-impact Event")
+                timing = "upcoming" if event_dt > now else "recent"
+                reason = f"High-Impact news ({title}) for {country} is {timing} at {event_dt.astimezone(BD_TZ).strftime('%H:%M')}"
+                return True, reason
+        except Exception as e:
+            logger.error(f"Error parsing news event date {event_date_str}: {e}")
+    return False, ""
+
+
+# --- Machine Learning System (Pure-Numpy Logistic Regression Classifier) ---
+ML_WEIGHTS = {
+    'weights': np.zeros(10),
+    'bias': 0.0,
+    'trained': False
+}
+
+def train_ml_model():
+    global ML_WEIGHTS
+    try:
+        with db_conn() as conn:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("""
+                SELECT indicators_status, result 
+                FROM trades 
+                WHERE status = 'COMPLETED' AND result IN ('WIN', 'LOSS')
+                ORDER BY expiry_time DESC LIMIT 500
+            """)
+            rows = cur.fetchall()
+            cur.close()
+        if len(rows) < 10:
+            logger.info(f"ML Model training skipped. Insufficient trade history ({len(rows)}/10 required).")
+            return
+        feature_names = ['trend', 'rsi', 'bb', 'vol', 'adx', 'ema_crossover', 'macd', 'atr', 'vwap', 'candle']
+        X, y = [], []
+        for r in rows:
+            status = r['indicators_status']
+            if isinstance(status, str):
+                try:
+                    status = json.loads(status)
+                except:
+                    continue
+            if not status:
+                continue
+            vec = [1.0 if status.get(fname, False) else 0.0 for fname in feature_names]
+            X.append(vec)
+            y.append(1.0 if r['result'] == 'WIN' else 0.0)
+        X = np.array(X)
+        y = np.array(y)
+        if len(X) < 10:
+            return
+        num_features = X.shape[1]
+        W = np.zeros(num_features)
+        b = 0.0
+        learning_rate = 0.1
+        epochs = 200
+        l2_reg = 0.1
+        for _ in range(epochs):
+            z = np.dot(X, W) + b
+            predictions = 1.0 / (1.0 + np.exp(-np.clip(z, -15, 15)))
+            errors = predictions - y
+            dW = (np.dot(X.T, errors) / len(y)) + l2_reg * W
+            db = np.sum(errors) / len(y)
+            W -= learning_rate * dW
+            b -= learning_rate * db
+        ML_WEIGHTS['weights'] = W
+        ML_WEIGHTS['bias'] = b
+        ML_WEIGHTS['trained'] = True
+        logger.info(f"ML Model trained successfully on {len(X)} trades. Weights: {W}, Bias: {b}")
+    except Exception as e:
+        logger.error(f"ML Training Error: {e}")
+
+def predict_win_probability(indicators_status):
+    global ML_WEIGHTS
+    if not ML_WEIGHTS['trained']:
+        return 0.5
+    feature_names = ['trend', 'rsi', 'bb', 'vol', 'adx', 'ema_crossover', 'macd', 'atr', 'vwap', 'candle']
+    vec = np.array([1.0 if indicators_status.get(fname, False) else 0.0 for fname in feature_names])
+    z = np.dot(vec, ML_WEIGHTS['weights']) + ML_WEIGHTS['bias']
+    prob = 1.0 / (1.0 + np.exp(-np.clip(z, -15, 15)))
+    return float(prob)
+
+
+# --- Refined Adaptive Confidence Calculation Formula ---
+def refine_confidence(base_score, symbol, ind, htf_trend, status):
+    weights = get_weights(symbol)
+    max_possible_score = sum(weights.values())
+    if max_possible_score <= 0:
+        max_possible_score = 100
+    score_pct = (base_score / max_possible_score) * 100.0
+    
+    # ১. Higher Timeframe Confirmation
+    signal_side = "BUY" if ind['curr_p'] > ind['sma_50'] else "SELL"
+    trend_5m = htf_trend.get("5m", "NEUTRAL")
+    trend_15m = htf_trend.get("15m", "NEUTRAL")
+    htf_confirm = 0
+    if (signal_side == "BUY" and trend_5m == "UP") or (signal_side == "SELL" and trend_5m == "DOWN"):
+        htf_confirm += 1
+    if (signal_side == "BUY" and trend_15m == "UP") or (signal_side == "SELL" and trend_15m == "DOWN"):
+        htf_confirm += 1
+    if htf_confirm == 2:
+        score_pct += 12.0
+    elif htf_confirm == 1:
+        score_pct += 6.0
+    else:
+        score_pct -= 10.0
+        
+    # ২. ADX Strength
+    adx_val = ind.get("adx_val", 0)
+    if adx_val > 25:
+        score_pct += 5.0
+    elif adx_val < 15:
+        score_pct -= 5.0
+        
+    # ৩. ATR Volatility Alignment
+    atr_val = ind.get("atr_val", 0)
+    curr_p = ind.get("curr_p", 1)
+    atr_pct = (atr_val / curr_p * 100) if curr_p > 0 else 0.2
+    if atr_pct > 0.4:
+        score_pct -= 8.0 # মাত্রাতিরিক্ত ঝুঁকি
+    elif atr_pct < 0.05:
+        score_pct -= 5.0 # গতিহীন বাজার
+        
+    # ৪. Market Session Volume Check
+    now_utc = datetime.now(timezone.utc)
+    hour_utc = now_utc.hour
+    is_london = (8 <= hour_utc < 16)
+    is_ny = (13 <= hour_utc < 21)
+    if is_london or is_ny:
+        score_pct += 5.0
+    else:
+        score_pct -= 5.0
+        
+    # ৫. Historical Win Rate Adjustment
+    stats = get_stats()
+    if stats['total_trades'] >= 10:
+        win_rate = stats['wins'] / stats['total_trades']
+        if win_rate >= 0.60:
+            score_pct += 5.0
+        elif win_rate <= 0.45:
+            score_pct -= 5.0
+            
+    # ৬. Machine Learning Win Prediction Integration
+    ml_prob = predict_win_probability(status)
+    ml_modifier = (ml_prob - 0.5) * 30.0 # Adds/Subtracts up to 15%
+    score_pct += ml_modifier
+    
+    return max(0.0, min(100.0, score_pct)), ml_prob
 
 
 def save_active_trade(trade):
     try:
         with db_conn() as conn:
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            # initial check is at expiry_time + 30 seconds
             next_retry = trade['expiry_time'] + timedelta(seconds=30)
             cur.execute("""
                 INSERT INTO trades (
@@ -406,7 +714,7 @@ def save_active_trade(trade):
             cur.close()
             return row['id'] if row else None
     except Exception as e:
-        print(f"Save Trade Error: {e}")
+        logger.error(f"Save Trade Error: {e}")
         return None
 
 
@@ -419,22 +727,21 @@ def has_active_trade():
             cur.close()
             return row[0] > 0 if row else False
     except Exception as e:
-        print(f"Error checking active trades: {e}")
+        logger.error(f"Error checking active trades: {e}")
         return False
 
 
 def get_candle_at_time(symbol, target_time, api_key):
-    values = get_market_data(symbol, api_key)
+    values_dict = get_batch_market_data([symbol], interval="1min")
+    values = values_dict.get(symbol)
     if not values:
         return None
-    
     if isinstance(target_time, (int, float)):
         target_dt = datetime.fromtimestamp(target_time, BD_TZ).replace(second=0, microsecond=0)
     elif isinstance(target_time, datetime):
         target_dt = target_time.astimezone(BD_TZ).replace(second=0, microsecond=0)
     else:
         return None
-
     for candle in values:
         try:
             candle_dt = datetime.strptime(candle.get('datetime', ''), "%Y-%m-%d %H:%M:%S").replace(tzinfo=BD_TZ)
@@ -446,7 +753,6 @@ def get_candle_at_time(symbol, target_time, api_key):
 
 
 def update_expired_trades():
-    # ACTIVE থেকে PENDING_RESULT-এ পরিণত করবে যা স্ক্যানারকে তাৎক্ষণিক নতুন সিগন্যাল খুঁজতে দেয়
     now = get_now()
     try:
         with db_conn() as conn:
@@ -459,7 +765,7 @@ def update_expired_trades():
             conn.commit()
             cur.close()
     except Exception as e:
-        print(f"Error transitioning expired trades: {e}")
+        logger.error(f"Error transitioning expired trades: {e}")
 
 
 def check_result():
@@ -475,7 +781,7 @@ def check_result():
             pending_trades = cur.fetchall()
             cur.close()
     except Exception as e:
-        print(f"Error fetching pending results: {e}")
+        logger.error(f"Error fetching pending results: {e}")
         return
 
     for trade in pending_trades:
@@ -484,17 +790,13 @@ def check_result():
         start_time = trade['start_time']
         expiry = trade['expiry_time']
         retry_count = trade['retry_count']
-        
         entry_key = os.getenv("RESULT_KEY_ENTRY", API_KEYS[0])
         exit_key  = os.getenv("RESULT_KEY_EXIT", API_KEYS[1] if len(API_KEYS) > 1 else API_KEYS[0])
-
         entry_price = get_candle_at_time(symbol, start_time, entry_key)
         exit_price  = get_candle_at_time(symbol, expiry, exit_key)
-
         if entry_price is None or exit_price is None:
             new_retry = retry_count + 1
             if new_retry < 4:
-                # পরবর্তী রিট্রাই ৩০ সেকেন্ড পর সেট করবে
                 next_retry = now + timedelta(seconds=30)
                 try:
                     with db_conn() as conn:
@@ -507,16 +809,14 @@ def check_result():
                         conn.commit()
                         cur.close()
                 except Exception as e:
-                    print(f"Error updating retry count: {e}")
+                    logger.error(f"Error updating retry count: {e}")
                 continue
             else:
-                # ৪ বার চেষ্টার পরও ডেটা না পেলে ফলব্যাক পদ্ধতিতে চেক করবে
                 if entry_price is None:
                     entry_price = float(trade['entry_price'])
                 if exit_price is None:
-                    values = get_market_data(symbol, exit_key)
-                    exit_price = float(values[0]['close']) if values else entry_price
-
+                    values = get_batch_market_data([symbol], interval="1min")
+                    exit_price = float(values[symbol][0]['close']) if (values and symbol in values and values[symbol]) else entry_price
                 if entry_price is None or exit_price is None:
                     try:
                         with db_conn() as conn:
@@ -530,17 +830,14 @@ def check_result():
                             cur.close()
                     except:
                         pass
-                    
                     send_telegram_msg(
                         f"⚠️ RESULT UNAVAILABLE\n\n"
                         f"Asset : {symbol}\n"
                         f"Result couldn't be verified after 4 attempts."
                     )
                     continue
-
         win = (exit_price > entry_price) if trade['side'] == "BUY" else (exit_price < entry_price)
         update_stats(win)
-
         indicators_status = trade['indicators_status']
         if isinstance(indicators_status, str):
             try:
@@ -549,14 +846,11 @@ def check_result():
                 indicators_status = {}
         if indicators_status:
             update_weights(symbol, indicators_status, win)
-
         s = get_stats()
         win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
         result_emoji = "✅ WIN" if win else "❌ LOSS"
-
         entry_candle = start_time.astimezone(BD_TZ).strftime("%H:%M")
         exit_candle = expiry.astimezone(BD_TZ).strftime("%H:%M")
-
         msg = (
             f"🏁 TRADE RESULT\n\n"
             f"📊 Asset: {symbol}\n"
@@ -567,7 +861,6 @@ def check_result():
             f"🕒 Exit Candle: {exit_candle}\n"
             f"📈 Win Rate: {win_rate:.1f}%"
         )
-
         try:
             with db_conn() as conn:
                 cur = conn.cursor()
@@ -579,25 +872,47 @@ def check_result():
                 conn.commit()
                 cur.close()
         except Exception as e:
-            print(f"Error marking trade as completed: {e}")
-
+            logger.error(f"Error marking trade as completed: {e}")
         send_telegram_msg(msg)
-        print(f"[{get_now().strftime('%H:%M:%S')}] Verified Result: {symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
+        logger.info(f"Verified Result: {symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
 
 
-def fetch_and_analyze_batch(symbols_chunk, api_key):
-    batch_data = get_batch_market_data(symbols_chunk, api_key)
+# --- Trades Table Periodic Database Archive Task ---
+def archive_old_trades():
+    try:
+        now = get_now()
+        thirty_days_ago = now - timedelta(days=30)
+        with db_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO trades_archive (id, symbol, entry_price, side, start_time, expiry_time, rec_time, indicators_status, status, result, archived_at)
+                SELECT id, symbol, entry_price, side, start_time, expiry_time, rec_time, indicators_status, status, result, %s
+                FROM trades
+                WHERE status IN ('COMPLETED', 'FAILED') AND expiry_time <= %s
+                ON CONFLICT (id) DO NOTHING
+            """, (now, thirty_days_ago))
+            cur.execute("""
+                DELETE FROM trades
+                WHERE status IN ('COMPLETED', 'FAILED') AND expiry_time <= %s
+            """, (thirty_days_ago,))
+            conn.commit()
+            cur.close()
+            logger.info("Database Archiving completed successfully.")
+    except Exception as e:
+        logger.error(f"Error running database trade archiving: {e}")
+
+
+def fetch_and_analyze_batch(symbols_chunk, api_key, htf_trends):
+    batch_data = get_batch_market_data(symbols_chunk, interval="1min")
     results    = []
     for symbol, values in batch_data.items():
         ind = calculate_indicators(values, symbol)
         if not ind:
             continue
         side_ema = "BUY" if ind['curr_p'] > ind['sma_50'] else "SELL"
-        def rsi_signal(rsi_val, side):
-            return (side == "BUY" and rsi_val < 40) or (side == "SELL" and rsi_val > 60)
         status = {
             'trend':        bool((ind['trend_up'] and ind['curr_p'] > ind['sma_50']) or (not ind['trend_up'] and ind['curr_p'] < ind['sma_50'])),
-            'rsi':          bool(rsi_signal(ind['rsi'], side_ema)),
+            'rsi':          bool((side_ema == "BUY" and ind['rsi'] < 40) or (side_ema == "SELL" and ind['rsi'] > 60)),
             'bb':           bool(ind['curr_p'] <= ind['lower'] or ind['curr_p'] >= ind['upper']),
             'vol':          bool(ind['vol_spike']),
             'adx':          bool(not ind['adx_low']),
@@ -607,46 +922,76 @@ def fetch_and_analyze_batch(symbols_chunk, api_key):
             'vwap':         bool((ind['vwap_up'] and side_ema == "BUY") or (not ind['vwap_up'] and side_ema == "SELL")),
             'candle':       bool(ind['candle_signal'])
         }
+        htf = htf_trends.get(symbol, {"5m": "NEUTRAL", "15m": "NEUTRAL"})
+        refined_conf, ml_prob = refine_confidence(ind['symbol_confidence'], symbol, ind, htf, status)
         results.append({
             'symbol': symbol,
             'curr_p': ind['curr_p'],
             'side':   side_ema,
-            'score':  ind['symbol_confidence'],
+            'score':  refined_conf,
             'status': status,
-            'ind':    ind
+            'ind':    ind,
+            'ml_prob': ml_prob,
+            'htf':    htf
         })
     return results
- 
+
+
 def run_scanner():
     global last_scan_minute
     now = get_now()
     if now.minute == last_scan_minute or not (0 <= now.second <= 10):
         return
     last_scan_minute = now.minute
-    
+
     if has_active_trade():
-        print(f"[{now.strftime('%H:%M:%S')}] Active trade in progress. Scanning skipped.")
+        logger.info("Active trade in progress. Scanning skipped.")
         return
 
-    print(f"[{now.strftime('%H:%M:%S')}] Scanning markets for signals...")
+    # প্রতি ঘণ্টার শুরুতে পুরোনো ট্রেডগুলো ব্যাকআপে পাঠানো হবে
+    if now.minute == 0:
+        archive_old_trades()
+
+    logger.info("Scanning markets for signals...")
+    try:
+        htf_trends = get_htf_trends(SYMBOLS)
+    except Exception as e:
+        logger.error(f"Error checking HTF trends: {e}")
+        htf_trends = {}
+
     all_results = []
     chunks = [SYMBOLS[i:i + 3] for i in range(0, len(SYMBOLS), 3)]
     with ThreadPoolExecutor(max_workers=7) as executor:
         futures = [
-            executor.submit(fetch_and_analyze_batch, chunk, API_KEYS[i % len(API_KEYS)])
+            executor.submit(fetch_and_analyze_batch, chunk, API_KEYS[i % len(API_KEYS)], htf_trends)
             for i, chunk in enumerate(chunks)
         ]
         for future in futures:
-            res = future.result()
-            if res:
-                all_results.extend(res)
-    print(f"[{now.strftime('%H:%M:%S')}] Analyzed {len(all_results)} symbols")
+            try:
+                res = future.result()
+                if res:
+                    all_results.extend(res)
+            except Exception as e:
+                logger.error(f"Error in thread execution: {e}")
+                
+    logger.info(f"Analyzed {len(all_results)} symbols")
     if all_results:
         best      = max(all_results, key=lambda x: x['score'])
-        weights   = get_weights(best['symbol'])
-        max_score = sum(weights.values())
-        conf      = round(min((best['score'] / max_score * 100) if max_score > 0 else 0, 99.0), 1)
-        action    = "Strong trade" if conf >= 80 else "Normal trade" if conf >= 60 else "Weak / scalp" if conf >= 40 else "Educational"
+        
+        # --- High-Impact News Filter Check ---
+        news_active, news_reason = is_high_impact_news_near(best['symbol'], buffer_minutes=30)
+        if news_active:
+            msg = (
+                f"⚠️ TRADE SKIPPED (High-Impact News Alert)\n\n"
+                f"Asset: {best['symbol']}\n"
+                f"Reason: {news_reason}\n"
+                f"Trading is temporarily paused to avoid high volatility. Robot will resume scanning in the next cycle."
+            )
+            send_telegram_msg(msg)
+            logger.warning(f"Trade skipped on {best['symbol']} due to high-impact news: {news_reason}")
+            return
+
+        conf      = round(best['score'], 1)
         atr_val = best['ind']['atr_val']
         curr_p  = best['curr_p']
         atr_pct = (atr_val / curr_p * 100) if curr_p > 0 else 0.2
@@ -658,7 +1003,7 @@ def run_scanner():
             rec_time = 12 if conf <= 60 else 15
         start  = get_now().replace(second=0, microsecond=0) + timedelta(minutes=1)
         expiry = start + timedelta(minutes=rec_time)
-        
+
         trade_data = {
             'symbol':            best['symbol'],
             'entry_price':       best['curr_p'],
@@ -673,12 +1018,15 @@ def run_scanner():
             entry_time = start.strftime("%H:%M")
             entry_candle = start.strftime("%H:%M")
             msg = (
-                f"🚨 {best['symbol']} -> {best['side']}\n"
-                f"Confidence: {conf:.1f}%\n"
-                f"Entry Time : {entry_time}\n"
-                f"Expiry : {rec_time} Min\n"
-                f"Entry Candle : {entry_candle}\n\n"
-                f"RSI: {best['ind']['rsi']:.1f} | Vol: {'High' if best['ind']['vol_spike'] else 'Normal'}\n\n"
+                f"🚨 SIGNAL ALERT: {best['symbol']} -> {best['side']}\n\n"
+                f"Confidence Score: {conf:.1f}%\n"
+                f"ML Prediction Win Rate: {best['ml_prob']*100:.1f}%\n"
+                f"5m Trend: {best['htf']['5m']} | 15m Trend: {best['htf']['15m']}\n"
+                f"Entry Price: {best['curr_p']:.5f}\n"
+                f"Entry Time: {entry_time}\n"
+                f"Expiry: {rec_time} Min\n\n"
+                f"RSI: {best['ind']['rsi']:.1f} | ADX: {best['ind']['adx_val']:.1f}\n"
+                f"Support: {best['ind']['support']:.5f} | Resistance: {best['ind']['resistance']:.5f}\n\n"
                 f"Place trade on Quotex exactly at the start of next minute (00s)!"
             )
             send_telegram_msg(msg)
@@ -688,17 +1036,17 @@ def run_scanner():
                     cur.execute("UPDATE trades SET msg_sent = TRUE WHERE id = %s", (saved_id,))
                     conn.commit()
                     cur.close()
-            except:
-                pass
- 
+            except Exception as e:
+                logger.error(f"Error updating msg_sent: {e}")
+
 if __name__ == "__main__":
     init_db()
     threading.Thread(target=run_web, daemon=True).start()
-    print("Bot is running with Adaptive Confidence System...")
+    logger.info("Bot is running with Adaptive ML & Intelligence Systems...")
     while True:
         try:
             run_scanner()
             check_result()
         except Exception as e:
-            print(f"System Error: {e}")
+            logger.error(f"System Loop Error: {e}")
         time.sleep(1)
