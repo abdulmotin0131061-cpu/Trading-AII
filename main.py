@@ -1,4 +1,4 @@
-import os ন্বজসজধশবসব্জক্স
+import os
 import requests
 import time
 import numpy as np
