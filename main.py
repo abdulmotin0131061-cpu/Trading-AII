@@ -33,6 +33,9 @@ BD_TZ = timezone(timedelta(hours=6))
 def get_now():
     return datetime.now(BD_TZ)
 
+# Global variables for daily report control
+last_report_date = None
+
 # --- DATABASE SETUP ---
 
 DATABASE_URL = "postgresql://neondb_owner:npg_axLci5T4ujdn@ep-patient-salad-atqhdzo2-pooler.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
@@ -182,7 +185,7 @@ def update_weights(symbol, indicators_status, win):
             cur = conn.cursor()
             factor_change = 0.05 if win else -0.05
             for name, active in indicators_status.items():
-                if active:
+                if active and isinstance(active, bool): # শুধুমাত্র বুলিয়ান ইন্ডিকেটরগুলোর রেশিও আপডেট করবে
                     cur.execute("""
                         UPDATE indicator_weights
                         SET accuracy_factor = LEAST(GREATEST(accuracy_factor + %s, 0.5), 1.5)
@@ -332,9 +335,10 @@ def calculate_indicators(values, symbol="EUR/USD"):
     signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean()
     macd_up     = bool(macd_line.iloc[-1] > signal_line.iloc[-1])
     
-    # --- MACD Histogram Slope ---
+    # --- MACD Histogram Slope & Value ---
     macd_hist = macd_line - signal_line
     macd_hist_slope_up = bool(macd_hist.iloc[-1] > macd_hist.iloc[-2]) if len(macd_hist) > 1 else False
+    macd_hist_val = float(macd_hist.iloc[-1]) if len(macd_hist) > 0 else 0.0
     
     high_series, low_series = pd.Series(df["high"]), pd.Series(df["low"])
     tr = pd.concat([
@@ -349,6 +353,11 @@ def calculate_indicators(values, symbol="EUR/USD"):
     vwap_series    = (tp * volume_series).cumsum() / volume_series.replace(0, 1).cumsum()
     vwap_up        = bool(pd.Series(prices_series).iloc[-1] > vwap_series.iloc[-1])
     vol_spike = volume_series.iloc[-1] > volume_series.rolling(20).mean().iloc[-1] * 1.5
+    
+    # --- Vol Ratio & S/R distance ---
+    rolling_vol_mean = volume_series.rolling(20).mean().iloc[-1]
+    vol_ratio = float(volume_series.iloc[-1] / rolling_vol_mean) if rolling_vol_mean > 0 else 1.0
+    
     high_arr = df["high"].values
     low_arr  = df["low"].values
     tr_arr   = tr.values
@@ -387,6 +396,11 @@ def calculate_indicators(values, symbol="EUR/USD"):
     resistance = max(recent_closes)
     swing_high = float(max(df["high"].iloc[-20:]))
     swing_low = float(min(df["low"].iloc[-20:]))
+    
+    ema_dist = float(abs(prices[-1] - ema_50))
+    sr_dist = float(min(abs(prices[-1] - support), abs(prices[-1] - resistance)))
+    bb_width = float(upper - lower)
+    vwap_dist = float(abs(prices[-1] - vwap_series.iloc[-1])) if len(vwap_series) > 0 else 0.0
     
     def rsi_signal(rsi_val, side):
         return (side == "BUY" and rsi_val < 40) or (side == "SELL" and rsi_val > 60)
@@ -430,7 +444,8 @@ def calculate_indicators(values, symbol="EUR/USD"):
         "candle_signal": candle_pattern, "atr_val": atr_val, "symbol_confidence": symbol_confidence,
         "adx_val": adx_val, "plus_di": pdi_val, "minus_di": mdi_val, "ema_50": ema_50, "ema_200": ema_200,
         "macd_hist_slope_up": macd_hist_slope_up, "support": support, "resistance": resistance,
-        "swing_high": swing_high, "swing_low": swing_low
+        "swing_high": swing_high, "swing_low": swing_low, "vol_ratio": vol_ratio, "ema_dist": ema_dist,
+        "sr_dist": sr_dist, "macd_hist_val": macd_hist_val, "bb_width": bb_width, "vwap_dist": vwap_dist
     }
 
 
@@ -557,6 +572,8 @@ def is_high_impact_news_near(symbol, buffer_minutes=30):
 ML_WEIGHTS = {
     'weights': np.zeros(10),
     'bias': 0.0,
+    'means': np.zeros(10),
+    'stds': np.ones(10),
     'trained': False
 }
 
@@ -569,14 +586,21 @@ def train_ml_model():
                 SELECT indicators_status, result 
                 FROM trades 
                 WHERE status = 'COMPLETED' AND result IN ('WIN', 'LOSS')
-                ORDER BY expiry_time DESC LIMIT 500
+                ORDER BY id DESC LIMIT 500
             """)
             rows = cur.fetchall()
             cur.close()
         if len(rows) < 10:
             logger.info(f"ML Model training skipped. Insufficient trade history ({len(rows)}/10 required).")
             return
-        feature_names = ['trend', 'rsi', 'bb', 'vol', 'adx', 'ema_crossover', 'macd', 'atr', 'vwap', 'candle']
+            
+        feature_names = ['rsi_num', 'adx_num', 'atr_num', 'ema_dist', 'vol_ratio', 'sr_dist', 'macd_hist', 'bb_width', 'vwap_dist', 'candle_num']
+        fallbacks = {
+            'rsi_num': 50.0, 'adx_num': 20.0, 'atr_num': 0.001, 'ema_dist': 0.0, 
+            'vol_ratio': 1.0, 'sr_dist': 0.001, 'macd_hist': 0.0, 'bb_width': 0.01, 
+            'vwap_dist': 0.0, 'candle_num': 0.0
+        }
+        
         X, y = [], []
         for r in rows:
             status = r['indicators_status']
@@ -587,31 +611,63 @@ def train_ml_model():
                     continue
             if not status:
                 continue
-            vec = [1.0 if status.get(fname, False) else 0.0 for fname in feature_names]
+            
+            # Map feature numeric values with backwards-compatible fallback handling
+            vec = []
+            for fname in feature_names:
+                val = status.get(fname)
+                if val is None:
+                    # Compatibility with old boolean formats
+                    if fname == 'rsi_num' and 'rsi' in status:
+                        val = 30.0 if status['rsi'] else 50.0
+                    elif fname == 'adx_num' and 'adx' in status:
+                        val = 30.0 if status['adx'] else 15.0
+                    elif fname == 'candle_num' and 'candle' in status:
+                        val = 1.0 if status['candle'] else 0.0
+                    else:
+                        val = fallbacks[fname]
+                elif isinstance(val, bool):
+                    val = 1.0 if val else 0.0
+                vec.append(float(val))
+                
             X.append(vec)
             y.append(1.0 if r['result'] == 'WIN' else 0.0)
+            
         X = np.array(X)
         y = np.array(y)
+        
         if len(X) < 10:
             return
-        num_features = X.shape[1]
+            
+        # Normalization (Z-Score)
+        means = np.mean(X, axis=0)
+        stds = np.std(X, axis=0)
+        stds[stds == 0] = 1e-8 # Division by zero lock
+        X_scaled = (X - means) / stds
+        
+        # Logistic Regression Gradient Descent
+        num_features = X_scaled.shape[1]
         W = np.zeros(num_features)
         b = 0.0
         learning_rate = 0.1
         epochs = 200
         l2_reg = 0.1
+        
         for _ in range(epochs):
-            z = np.dot(X, W) + b
+            z = np.dot(X_scaled, W) + b
             predictions = 1.0 / (1.0 + np.exp(-np.clip(z, -15, 15)))
             errors = predictions - y
-            dW = (np.dot(X.T, errors) / len(y)) + l2_reg * W
+            dW = (np.dot(X_scaled.T, errors) / len(y)) + l2_reg * W
             db = np.sum(errors) / len(y)
             W -= learning_rate * dW
             b -= learning_rate * db
+            
         ML_WEIGHTS['weights'] = W
         ML_WEIGHTS['bias'] = b
+        ML_WEIGHTS['means'] = means
+        ML_WEIGHTS['stds'] = stds
         ML_WEIGHTS['trained'] = True
-        logger.info(f"ML Model trained successfully on {len(X)} trades. Weights: {W}, Bias: {b}")
+        logger.info(f"ML Model trained successfully on {len(X)} unique trades. Bias: {b}")
     except Exception as e:
         logger.error(f"ML Training Error: {e}")
 
@@ -619,9 +675,21 @@ def predict_win_probability(indicators_status):
     global ML_WEIGHTS
     if not ML_WEIGHTS['trained']:
         return 0.5
-    feature_names = ['trend', 'rsi', 'bb', 'vol', 'adx', 'ema_crossover', 'macd', 'atr', 'vwap', 'candle']
-    vec = np.array([1.0 if indicators_status.get(fname, False) else 0.0 for fname in feature_names])
-    z = np.dot(vec, ML_WEIGHTS['weights']) + ML_WEIGHTS['bias']
+    feature_names = ['rsi_num', 'adx_num', 'atr_num', 'ema_dist', 'vol_ratio', 'sr_dist', 'macd_hist', 'bb_width', 'vwap_dist', 'candle_num']
+    fallbacks = {
+        'rsi_num': 50.0, 'adx_num': 20.0, 'atr_num': 0.001, 'ema_dist': 0.0, 
+        'vol_ratio': 1.0, 'sr_dist': 0.001, 'macd_hist': 0.0, 'bb_width': 0.01, 
+        'vwap_dist': 0.0, 'candle_num': 0.0
+    }
+    vec = []
+    for fname in feature_names:
+        val = indicators_status.get(fname, fallbacks[fname])
+        if isinstance(val, bool):
+            val = 1.0 if val else 0.0
+        vec.append(float(val))
+    vec = np.array(vec)
+    vec_scaled = (vec - ML_WEIGHTS['means']) / ML_WEIGHTS['stds']
+    z = np.dot(vec_scaled, ML_WEIGHTS['weights']) + ML_WEIGHTS['bias']
     prob = 1.0 / (1.0 + np.exp(-np.clip(z, -15, 15)))
     return float(prob)
 
@@ -722,7 +790,8 @@ def has_active_trade():
     try:
         with db_conn() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM trades WHERE status = 'ACTIVE'")
+            # Active অথবা Pending Result (ফলাফল যাচাইয়ের অপেক্ষায় থাকা) কোনো ট্রেড শেষ না হওয়া পর্যন্ত স্ক্যানিং বন্ধ থাকবে
+            cur.execute("SELECT COUNT(*) FROM trades WHERE status IN ('ACTIVE', 'PENDING_RESULT')")
             row = cur.fetchone()
             cur.close()
             return row[0] > 0 if row else False
@@ -794,6 +863,7 @@ def check_result():
         exit_key  = os.getenv("RESULT_KEY_EXIT", API_KEYS[1] if len(API_KEYS) > 1 else API_KEYS[0])
         entry_price = get_candle_at_time(symbol, start_time, entry_key)
         exit_price  = get_candle_at_time(symbol, expiry, exit_key)
+        
         if entry_price is None or exit_price is None:
             new_retry = retry_count + 1
             if new_retry < 4:
@@ -836,31 +906,11 @@ def check_result():
                         f"Result couldn't be verified after 4 attempts."
                     )
                     continue
+                    
         win = (exit_price > entry_price) if trade['side'] == "BUY" else (exit_price < entry_price)
-        update_stats(win)
-        indicators_status = trade['indicators_status']
-        if isinstance(indicators_status, str):
-            try:
-                indicators_status = json.loads(indicators_status)
-            except:
-                indicators_status = {}
-        if indicators_status:
-            update_weights(symbol, indicators_status, win)
-        s = get_stats()
-        win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
-        result_emoji = "✅ WIN" if win else "❌ LOSS"
-        entry_candle = start_time.astimezone(BD_TZ).strftime("%H:%M")
-        exit_candle = expiry.astimezone(BD_TZ).strftime("%H:%M")
-        msg = (
-            f"🏁 TRADE RESULT\n\n"
-            f"📊 Asset: {symbol}\n"
-            f"🏆 Result: {result_emoji}\n"
-            f"🚀 Entry: {entry_price:.5f}\n"
-            f"🕒 Entry Candle: {entry_candle}\n\n"
-            f"🏁 Exit: {exit_price:.5f}\n"
-            f"🕒 Exit Candle: {exit_candle}\n"
-            f"📈 Win Rate: {win_rate:.1f}%"
-        )
+        
+        # --- ATOMIC STATE LOCK ---
+        # মেসেজ পাঠানোর পূর্বে ডাটাবেজে COMPLETED ও SENT স্ট্যাটাস আপডেট করে ডুপ্লিকেট মেসেজ পাঠানো আটকাবে
         try:
             with db_conn() as conn:
                 cur = conn.cursor()
@@ -872,9 +922,129 @@ def check_result():
                 conn.commit()
                 cur.close()
         except Exception as e:
-            logger.error(f"Error marking trade as completed: {e}")
+            logger.error(f"Error updating database completion lock for trade {trade_id}: {e}")
+            continue # ডাটাবেজ আপডেট ব্যর্থ হলে ডুপ্লিকেট প্রসেসিং এড়াতে প্রসেস স্কিপ করবে
+            
+        update_stats(win)
+        indicators_status = trade['indicators_status']
+        if isinstance(indicators_status, str):
+            try:
+                indicators_status = json.loads(indicators_status)
+            except:
+                indicators_status = {}
+        if indicators_status:
+            update_weights(symbol, indicators_status, win)
+            
+        s = get_stats()
+        win_rate = (s['wins'] / s['total_trades'] * 100) if s['total_trades'] > 0 else 0
+        result_emoji = "✅ WIN" if win else "❌ LOSS"
+        entry_candle = start_time.astimezone(BD_TZ).strftime("%H:%M")
+        exit_candle = expiry.astimezone(BD_TZ).strftime("%H:%M")
+        
+        msg = (
+            f"🏁 TRADE RESULT\n\n"
+            f"📊 Asset: {symbol}\n"
+            f"🏆 Result: {result_emoji}\n"
+            f"🚀 Entry: {entry_price:.5f}\n"
+            f"🕒 Entry Candle: {entry_candle}\n\n"
+            f"🏁 Exit: {exit_price:.5f}\n"
+            f"🕒 Exit Candle: {exit_candle}\n"
+            f"📈 Win Rate: {win_rate:.1f}%"
+        )
         send_telegram_msg(msg)
         logger.info(f"Verified Result: {symbol} - {result_emoji} | Entry: {entry_price} | Exit: {exit_price}")
+
+
+# --- Daily Report Generation Task (BD Time 10:00 AM) ---
+def check_and_send_daily_report():
+    global last_report_date
+    now = get_now()
+    current_date_str = now.strftime("%d-%m-%Y")
+    
+    # সকাল ১০টা বা তার পরে এবং আজকের দিনে যদি আগে রিপোর্ট পাঠানো না হয়ে থাকে
+    if now.hour >= 10 and last_report_date != current_date_str:
+        logger.info("Generating daily ML performance report...")
+        try:
+            one_day_ago = now - timedelta(days=1)
+            with db_conn() as conn:
+                cur = conn.cursor(cursor_factory=RealDictCursor)
+                cur.execute("""
+                    SELECT indicators_status, result 
+                    FROM trades 
+                    WHERE status = 'COMPLETED' AND result IN ('WIN', 'LOSS') AND expiry_time >= %s
+                """, (one_day_ago,))
+                rows = cur.fetchall()
+                cur.close()
+                
+            total_predictions = len(rows)
+            correct = 0
+            wrong = 0
+            
+            high_taken = 0
+            high_wins = 0
+            med_taken = 0
+            med_wins = 0
+            
+            for r in rows:
+                status = r['indicators_status']
+                if isinstance(status, str):
+                    try:
+                        status = json.loads(status)
+                    except:
+                        status = {}
+                if not status:
+                    continue
+                    
+                is_win = r['result'] == 'WIN'
+                if is_win:
+                    correct += 1
+                else:
+                    wrong += 1
+                    
+                conf = status.get('confidence', 0.0)
+                if conf >= 80.0:
+                    high_taken += 1
+                    if is_win:
+                        high_wins += 1
+                elif conf >= 60.0:
+                    med_taken += 1
+                    if is_win:
+                        med_wins += 1
+                        
+            accuracy = (correct / total_predictions * 100) if total_predictions > 0 else 0.0
+            high_win_rate = (high_wins / high_taken * 100) if high_taken > 0 else 0.0
+            med_win_rate = (med_wins / med_taken * 100) if med_taken > 0 else 0.0
+            
+            if accuracy >= 65.0:
+                ml_status = "GOOD"
+            elif accuracy >= 50.0:
+                ml_status = "MODERATE"
+            else:
+                ml_status = "POOR"
+                
+            msg = (
+                f"🤖 ML DAILY REPORT\n\n"
+                f"Date: {current_date_str}\n\n"
+                f"Total Predictions: {total_predictions}\n"
+                f"Correct: {correct}\n"
+                f"Wrong: {wrong}\n"
+                f"Accuracy: {accuracy:.1f}%\n\n"
+                f"High Confidence Signals:\n"
+                f"80%-100%\n"
+                f"Taken: {high_taken}\n"
+                f"Wins: {high_wins}\n"
+                f"Win Rate: {high_win_rate:.1f}%\n\n"
+                f"Medium Confidence:\n"
+                f"60%-80%\n"
+                f"Win Rate: {med_win_rate:.1f}%\n\n"
+                f"ML Status:\n"
+                f"{ml_status}"
+            )
+            send_telegram_msg(msg)
+            last_report_date = current_date_str
+            logger.info("Daily ML performance report successfully sent.")
+        except Exception as e:
+            logger.error(f"Error compiling daily report: {e}")
 
 
 # --- Trades Table Periodic Database Archive Task ---
@@ -910,7 +1080,10 @@ def fetch_and_analyze_batch(symbols_chunk, api_key, htf_trends):
         if not ind:
             continue
         side_ema = "BUY" if ind['curr_p'] > ind['sma_50'] else "SELL"
+        
+        # Boolean ও Numeric ফিচারগুলোর সমন্বিত ডিকশনারি
         status = {
+            # Boolean indicators for weight tuning (Compatibility)
             'trend':        bool((ind['trend_up'] and ind['curr_p'] > ind['sma_50']) or (not ind['trend_up'] and ind['curr_p'] < ind['sma_50'])),
             'rsi':          bool((side_ema == "BUY" and ind['rsi'] < 40) or (side_ema == "SELL" and ind['rsi'] > 60)),
             'bb':           bool(ind['curr_p'] <= ind['lower'] or ind['curr_p'] >= ind['upper']),
@@ -920,10 +1093,27 @@ def fetch_and_analyze_batch(symbols_chunk, api_key, htf_trends):
             'macd':         bool((ind['macd_up'] and side_ema == "BUY") or (not ind['macd_up'] and side_ema == "SELL")),
             'atr':          bool(ind['volatility_low']),
             'vwap':         bool((ind['vwap_up'] and side_ema == "BUY") or (not ind['vwap_up'] and side_ema == "SELL")),
-            'candle':       bool(ind['candle_signal'])
+            'candle':       bool(ind['candle_signal']),
+            
+            # Rich numeric features for accurate Machine Learning prediction
+            'rsi_num':      float(ind['rsi']),
+            'adx_num':      float(ind['adx_val']),
+            'atr_num':      float(ind['atr_val']),
+            'ema_dist':     float(ind['ema_dist']),
+            'vol_ratio':    float(ind['vol_ratio']),
+            'sr_dist':      float(ind['sr_dist']),
+            'macd_hist':    float(ind['macd_hist_val']),
+            'bb_width':     float(ind['bb_width']),
+            'vwap_dist':    float(ind['vwap_dist']),
+            'candle_num':   1.0 if ind['candle_signal'] else 0.0
         }
+        
         htf = htf_trends.get(symbol, {"5m": "NEUTRAL", "15m": "NEUTRAL"})
         refined_conf, ml_prob = refine_confidence(ind['symbol_confidence'], symbol, ind, htf, status)
+        
+        # Store confidence inside status mapping for report parsing later
+        status['confidence'] = float(refined_conf)
+        
         results.append({
             'symbol': symbol,
             'curr_p': ind['curr_p'],
@@ -945,7 +1135,7 @@ def run_scanner():
     last_scan_minute = now.minute
 
     if has_active_trade():
-        logger.info("Active trade in progress. Scanning skipped.")
+        logger.info("Active trade in progress or result pending. Scanning skipped.")
         return
 
     # প্রতি ঘণ্টার শুরুতে পুরোনো ট্রেডগুলো ব্যাকআপে পাঠানো হবে
@@ -1045,6 +1235,7 @@ if __name__ == "__main__":
     logger.info("Bot is running with Adaptive ML & Intelligence Systems...")
     while True:
         try:
+            check_and_send_daily_report() # সকাল ১০টায় ডেইলি রিপোর্ট চেক ও সাবমিট করবে
             run_scanner()
             check_result()
         except Exception as e:
