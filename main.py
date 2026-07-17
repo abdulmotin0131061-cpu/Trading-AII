@@ -1,9 +1,4 @@
-Flask
-requests
-numpy
-pandas
-psycopg2-binary
-gunicorn
+import os import requests import time import numpy as np
 
 from flask import Flask import threading from datetime import datetime,
 timedelta, timezone import psycopg2 from psycopg2.extras import RealDictCursor
