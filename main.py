@@ -102,12 +102,10 @@ if not DATABASE_URL:
 
 
 API_KEYS = [
-    "এখানে ১ নম্বর key",
-    "এখানে ২ নম্বর key",
-    "এখানে ৩ নম্বর key",
-    "এখানে ৪ নম্বর key",
-    "এখানে ৫ নম্বর key",
-    "এখানে ৬ নম্বর key",
+    "76d81f1fba224b9e88015b34fdcc7f76",
+    "5d9e7b9a4a014dd38746242410e033e0",
+    "769c447e581d4592ad14f7023db745b3",
+    "2ca49ec0c0534851b8ee88bd01858eaf",
 ]
 
 if not API_KEYS:
