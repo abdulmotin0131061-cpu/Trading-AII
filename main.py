@@ -96,9 +96,7 @@ DEFAULT_WEIGHTS = {
 }
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is required.")
+DATABASE_URL = "postgresql://neondb_owner:npg_xQl3EYGgjvN4@ep-muddy-tooth-a7smuza8-pooler.ap-southeast-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 
 API_KEYS = [
