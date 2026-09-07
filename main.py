@@ -102,12 +102,16 @@ if not DATABASE_URL:
 
 
 API_KEYS = [
-    key.strip()
-    for key in os.getenv("TWELVE_DATA_API_KEYS", "").split(",")
-    if key.strip()
+    "এখানে ১ নম্বর key",
+    "এখানে ২ নম্বর key",
+    "এখানে ৩ নম্বর key",
+    "এখানে ৪ নম্বর key",
+    "এখানে ৫ নম্বর key",
+    "এখানে ৬ নম্বর key",
 ]
+
 if not API_KEYS:
-    raise RuntimeError("TWELVE_DATA_API_KEYS environment variable is required.")
+    raise RuntimeError("At least one Twelve Data API key is required.")
 
 
 TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
