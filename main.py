@@ -106,6 +106,8 @@ API_KEYS = [
     "5d9e7b9a4a014dd38746242410e033e0",
     "769c447e581d4592ad14f7023db745b3",
     "2ca49ec0c0534851b8ee88bd01858eaf",
+    "6a5adb88517744aba3a40c948404d0b9",
+    "c0bc2922d3c7486f8234dd67cd18b46a",
 ]
 
 if not API_KEYS:
