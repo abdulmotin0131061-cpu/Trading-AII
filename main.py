@@ -110,8 +110,8 @@ if not API_KEYS:
     raise RuntimeError("TWELVE_DATA_API_KEYS environment variable is required.")
 
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
+TELEGRAM_CHAT_ID = "6793328058"
 
 RESULT_KEY_ENTRY = os.getenv("RESULT_KEY_ENTRY", API_KEYS[0]).strip()
 RESULT_KEY_EXIT = os.getenv(
