@@ -194,33 +194,24 @@ DEFAULT_WEIGHTS = {
 
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-
-if not DATABASE_URL:
-
-    raise RuntimeError("DATABASE_URL environment variable is required.")
+DATABASE_URL = "postgresql://neondb_owner:npg_xQl3EYGgjvN4@ep-muddy-tooth-a7smuza8-pooler.ap-southeast-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 
 
 API_KEYS = [
-
-    key.strip()
-
-    for key in os.getenv("TWELVE_DATA_API_KEYS", "").split(",")
-
-    if key.strip()
-
+    "76d81f1fba224b9e88015b34fdcc7f76",
+    "5d9e7b9a4a014dd38746242410e033e0",
+    "769c447e581d4592ad14f7023db745b3",
+    "2ca49ec0c0534851b8ee88bd01858eaf",
+    "6a5adb88517744aba3a40c948404d0b9",
+    "c0bc2922d3c7486f8234dd67cd18b46a",
 ]
 
-if not API_KEYS:
-
-    raise RuntimeError("TWELVE_DATA_API_KEYS environment variable is required.")
 
 
+TELEGRAM_TOKEN = "8385011968:AAEP6CjEuUO77Llary88GI0_snxfkrHjrV0"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CHAT_ID = "6793328058"
 
 
 
