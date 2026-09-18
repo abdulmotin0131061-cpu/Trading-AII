@@ -146,15 +146,7 @@ TIMEFRAME = INTERVAL  # explicit timeframe dimension, used by history/ML layers
 
 SYMBOLS = [
 
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF",
-
-    "NZD/USD", "EUR/JPY", "GBP/JPY", "EUR/GBP",
-
-    "BTC/USD", "ETH/USD", "LTC/USD", "XRP/USD", "SOL/USD", "ADA/USD",
-
-    "XAU/USD", "XAG/USD",
-
-    "GBP/AUD", "EUR/AUD", "AUD/JPY",
+     "GBP/AUD", "ETH/USD",
 
 ]
 
