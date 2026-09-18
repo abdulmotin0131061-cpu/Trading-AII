@@ -186,7 +186,7 @@ DEFAULT_WEIGHTS = {
 
 
 
-DATABASE_URL = "postgresql://neondb_owner:npg_xQl3EYGgjvN4@ep-muddy-tooth-a7smuza8-pooler.ap-southeast-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+DATABASE_URL = "postgresql://neondb_owner:npg_zAq58BndVebi@ep-muddy-tooth-a7smuza8-pooler.ap-southeast-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 
 
